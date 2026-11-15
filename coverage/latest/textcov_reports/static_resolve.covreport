@@ -6,50 +6,50 @@ LLVMFuzzerInitialize:
   256|       |                $init;
   257|      2|                0
   258|      2|            }
-_RNvNvCsdxeCEj5z00U_14static_resolve1__19___libfuzzer_sys_run:
-  293|  1.05k|            fn __libfuzzer_sys_run($bytes: &[u8]) -> $rty {
+_RNvNvCs3zMdlecYlxj_14static_resolve1__19___libfuzzer_sys_run:
+  293|    285|            fn __libfuzzer_sys_run($bytes: &[u8]) -> $rty {
   294|       |                $body
-  295|  1.05k|            }
+  295|    285|            }
 rust_fuzzer_test_input:
-  261|  1.05k|            pub extern "C" fn rust_fuzzer_test_input(bytes: &[u8]) -> i32 {
+  261|    285|            pub extern "C" fn rust_fuzzer_test_input(bytes: &[u8]) -> i32 {
   262|       |                // When `RUST_LIBFUZZER_DEBUG_PATH` is set, write the debug
   263|       |                // formatting of the input to that file. This is only intended for
   264|       |                // `cargo fuzz`'s use!
   265|       |
   266|       |                // `RUST_LIBFUZZER_DEBUG_PATH` is set in initialization.
-  267|  1.05k|                if let Some(path) = $crate::rust_libfuzzer_debug_path() {
+  267|    285|                if let Some(path) = $crate::rust_libfuzzer_debug_path() {
   268|       |                    use std::io::Write;
   269|      0|                    let mut file = std::fs::File::create(path)
   270|      0|                        .expect("failed to create `RUST_LIBFUZZER_DEBUG_PATH` file");
   271|      0|                    writeln!(&mut file, "{:?}", bytes)
   272|      0|                        .expect("failed to write to `RUST_LIBFUZZER_DEBUG_PATH` file");
   273|      0|                    return 0;
-  274|  1.05k|                }
+  274|    285|                }
   275|       |
-  276|  1.05k|                let result = ::libfuzzer_sys::Corpus::from(__libfuzzer_sys_run(bytes));
-  277|  1.05k|                result.to_libfuzzer_code()
-  278|  1.05k|            }
+  276|    285|                let result = ::libfuzzer_sys::Corpus::from(__libfuzzer_sys_run(bytes));
+  277|    285|                result.to_libfuzzer_code()
+  278|    285|            }
 LLVMFuzzerTestOneInput:
-   59|  1.05k|pub unsafe fn test_input_wrap(data: *const u8, size: usize) -> i32 {
-   60|  1.05k|    let test_input = ::std::panic::catch_unwind(|| {
+   59|    285|pub unsafe fn test_input_wrap(data: *const u8, size: usize) -> i32 {
+   60|    285|    let test_input = ::std::panic::catch_unwind(|| {
    61|       |        let data_slice = ::std::slice::from_raw_parts(data, size);
    62|       |        rust_fuzzer_test_input(data_slice)
    63|       |    });
    64|       |
-   65|  1.05k|    match test_input {
-   66|  1.05k|        Ok(i) => i,
+   65|    285|    match test_input {
+   66|    285|        Ok(i) => i,
    67|       |        Err(_) => {
    68|       |            // hopefully the custom panic hook will be called before and abort the
    69|       |            // process before the stack frames are unwinded.
    70|      0|            ::std::process::abort();
    71|       |        }
    72|       |    }
-   73|  1.05k|}
+   73|    285|}
 _RNCNvCsg9b96z6GT7D_13libfuzzer_sys15test_input_wrap0B3_:
-   60|  1.05k|    let test_input = ::std::panic::catch_unwind(|| {
-   61|  1.05k|        let data_slice = ::std::slice::from_raw_parts(data, size);
-   62|  1.05k|        rust_fuzzer_test_input(data_slice)
-   63|  1.05k|    });
+   60|    285|    let test_input = ::std::panic::catch_unwind(|| {
+   61|    285|        let data_slice = ::std::slice::from_raw_parts(data, size);
+   62|    285|        rust_fuzzer_test_input(data_slice)
+   63|    285|    });
 _RNCNvCsg9b96z6GT7D_13libfuzzer_sys25rust_libfuzzer_debug_path0B3_:
    78|      1|    RUST_LIBFUZZER_DEBUG_PATH.get_or_init(|| std::env::var("RUST_LIBFUZZER_DEBUG_PATH").ok())
 _RNvCsg9b96z6GT7D_13libfuzzer_sys10initialize:
@@ -70,137 +70,137 @@ _RNvCsg9b96z6GT7D_13libfuzzer_sys10initialize:
    96|      2|    0
    97|      2|}
 _RNvCsg9b96z6GT7D_13libfuzzer_sys25rust_libfuzzer_debug_path:
-   76|  1.05k|pub fn rust_libfuzzer_debug_path() -> &'static Option<String> {
+   76|    285|pub fn rust_libfuzzer_debug_path() -> &'static Option<String> {
    77|       |    static RUST_LIBFUZZER_DEBUG_PATH: OnceLock<Option<String>> = OnceLock::new();
-   78|  1.05k|    RUST_LIBFUZZER_DEBUG_PATH.get_or_init(|| std::env::var("RUST_LIBFUZZER_DEBUG_PATH").ok())
-   79|  1.05k|}
+   78|    285|    RUST_LIBFUZZER_DEBUG_PATH.get_or_init(|| std::env::var("RUST_LIBFUZZER_DEBUG_PATH").ok())
+   79|    285|}
 _RNvMs_Csg9b96z6GT7D_13libfuzzer_sysNtB4_6Corpus17to_libfuzzer_code:
-   40|  1.05k|    pub fn to_libfuzzer_code(self) -> i32 {
-   41|  1.05k|        match self {
-   42|  1.05k|            Corpus::Keep => 0,
+   40|    285|    pub fn to_libfuzzer_code(self) -> i32 {
+   41|    285|        match self {
+   42|    285|            Corpus::Keep => 0,
    43|      0|            Corpus::Reject => -1,
    44|       |        }
-   45|  1.05k|    }
+   45|    285|    }
 _RNvXCsg9b96z6GT7D_13libfuzzer_sysNtB2_6CorpusINtNtCs6SNw0SRvItZ_4core7convert4FromuE4from:
-   30|  1.05k|    fn from(_: ()) -> Self {
-   31|  1.05k|        Self::Keep
-   32|  1.05k|    }
+   30|    285|    fn from(_: ()) -> Self {
+   31|    285|        Self::Keep
+   32|    285|    }
 
-_RNvCsaQ98foBM0gP_16percent_encoding14percent_decodeCsOmTKQdZnin_4verd:
-  240|  1.05k|pub fn percent_decode(input: &[u8]) -> PercentDecode<'_> {
-  241|  1.05k|    PercentDecode {
-  242|  1.05k|        bytes: input.iter(),
-  243|  1.05k|    }
-  244|  1.05k|}
-_RNvCsaQ98foBM0gP_16percent_encoding18percent_decode_strCsOmTKQdZnin_4verd:
-  217|  1.05k|pub fn percent_decode_str(input: &str) -> PercentDecode<'_> {
-  218|  1.05k|    percent_decode(input.as_bytes())
-  219|  1.05k|}
+_RNvCsaQ98foBM0gP_16percent_encoding14percent_decodeCs4vRcMGCgR5c_4verd:
+  240|    285|pub fn percent_decode(input: &[u8]) -> PercentDecode<'_> {
+  241|    285|    PercentDecode {
+  242|    285|        bytes: input.iter(),
+  243|    285|    }
+  244|    285|}
+_RNvCsaQ98foBM0gP_16percent_encoding18percent_decode_strCs4vRcMGCgR5c_4verd:
+  217|    285|pub fn percent_decode_str(input: &str) -> PercentDecode<'_> {
+  218|    285|    percent_decode(input.as_bytes())
+  219|    285|}
 _RNCNvMs3_CsaQ98foBM0gP_16percent_encodingNtB7_13PercentDecode6if_any0B7_:
-  294|   487k|        while bytes_iter.any(|&b| b == b'%') {
+  294|  22.4k|        while bytes_iter.any(|&b| b == b'%') {
 _RNCNvXs1_CsaQ98foBM0gP_16percent_encodingNtB7_13PercentDecodeNtNtNtNtCs6SNw0SRvItZ_4core4iter6traits8iterator8Iterator4next0B7_:
-  264|   123k|        self.bytes.next().map(|&byte| {
-  265|   123k|            if byte == b'%' {
-  266|  33.2k|                after_percent_sign(&mut self.bytes).unwrap_or(byte)
+  264|  1.44k|        self.bytes.next().map(|&byte| {
+  265|  1.44k|            if byte == b'%' {
+  266|    609|                after_percent_sign(&mut self.bytes).unwrap_or(byte)
   267|       |            } else {
-  268|  90.1k|                byte
+  268|    833|                byte
   269|       |            }
-  270|   123k|        })
+  270|  1.44k|        })
 _RNvCsaQ98foBM0gP_16percent_encoding18after_percent_sign:
-  252|  36.8k|fn after_percent_sign(iter: &mut slice::Iter<'_, u8>) -> Option<u8> {
-  253|  36.8k|    let mut cloned_iter = iter.clone();
-  254|  36.8k|    let h = char::from(*cloned_iter.next()?).to_digit(16)?;
-  255|  32.7k|    let l = char::from(*cloned_iter.next()?).to_digit(16)?;
-  256|  19.7k|    *iter = cloned_iter;
-  257|  19.7k|    Some(h as u8 * 0x10 + l as u8)
-  258|  36.8k|}
+  252|  1.09k|fn after_percent_sign(iter: &mut slice::Iter<'_, u8>) -> Option<u8> {
+  253|  1.09k|    let mut cloned_iter = iter.clone();
+  254|  1.09k|    let h = char::from(*cloned_iter.next()?).to_digit(16)?;
+  255|    659|    let l = char::from(*cloned_iter.next()?).to_digit(16)?;
+  256|    260|    *iter = cloned_iter;
+  257|    260|    Some(h as u8 * 0x10 + l as u8)
+  258|  1.09k|}
 _RNvMs3_CsaQ98foBM0gP_16percent_encodingNtB5_13PercentDecode11decode_utf8:
-  312|  1.05k|    pub fn decode_utf8(self) -> Result<Cow<'a, str>, str::Utf8Error> {
-  313|  1.05k|        match self.clone().into() {
-  314|    734|            Cow::Borrowed(bytes) => match str::from_utf8(bytes) {
-  315|    734|                Ok(s) => Ok(s.into()),
+  312|    285|    pub fn decode_utf8(self) -> Result<Cow<'a, str>, str::Utf8Error> {
+  313|    285|        match self.clone().into() {
+  314|    220|            Cow::Borrowed(bytes) => match str::from_utf8(bytes) {
+  315|    220|                Ok(s) => Ok(s.into()),
   316|      0|                Err(e) => Err(e),
   317|       |            },
-  318|    319|            Cow::Owned(bytes) => match String::from_utf8(bytes) {
-  319|     86|                Ok(s) => Ok(s.into()),
-  320|    233|                Err(e) => Err(e.utf8_error()),
+  318|     65|            Cow::Owned(bytes) => match String::from_utf8(bytes) {
+  319|     39|                Ok(s) => Ok(s.into()),
+  320|     26|                Err(e) => Err(e.utf8_error()),
   321|       |            },
   322|       |        }
-  323|  1.05k|    }
+  323|    285|    }
 _RNvMs3_CsaQ98foBM0gP_16percent_encodingNtB5_13PercentDecode6if_any:
-  292|  1.05k|    fn if_any(&self) -> Option<Vec<u8>> {
-  293|  1.05k|        let mut bytes_iter = self.bytes.clone();
-  294|  4.30k|        while bytes_iter.any(|&b| b == b'%') {
-  295|  3.57k|            if let Some(decoded_byte) = after_percent_sign(&mut bytes_iter) {
-  296|    319|                let initial_bytes = self.bytes.as_slice();
-  297|    319|                let unchanged_bytes_len = initial_bytes.len() - bytes_iter.len() - 3;
-  298|    319|                let mut decoded = initial_bytes[..unchanged_bytes_len].to_owned();
-  299|    319|                decoded.push(decoded_byte);
-  300|    319|                decoded.extend(PercentDecode { bytes: bytes_iter });
-  301|    319|                return Some(decoded);
-  302|  3.25k|            }
+  292|    285|    fn if_any(&self) -> Option<Vec<u8>> {
+  293|    285|        let mut bytes_iter = self.bytes.clone();
+  294|    705|        while bytes_iter.any(|&b| b == b'%') {
+  295|    485|            if let Some(decoded_byte) = after_percent_sign(&mut bytes_iter) {
+  296|     65|                let initial_bytes = self.bytes.as_slice();
+  297|     65|                let unchanged_bytes_len = initial_bytes.len() - bytes_iter.len() - 3;
+  298|     65|                let mut decoded = initial_bytes[..unchanged_bytes_len].to_owned();
+  299|     65|                decoded.push(decoded_byte);
+  300|     65|                decoded.extend(PercentDecode { bytes: bytes_iter });
+  301|     65|                return Some(decoded);
+  302|    420|            }
   303|       |        }
   304|       |        // Nothing to decode
-  305|    734|        None
-  306|  1.05k|    }
+  305|    220|        None
+  306|    285|    }
 _RNvXs1_CsaQ98foBM0gP_16percent_encodingNtB5_13PercentDecodeNtNtNtNtCs6SNw0SRvItZ_4core4iter6traits8iterator8Iterator4next:
-  263|   123k|    fn next(&mut self) -> Option<u8> {
-  264|   123k|        self.bytes.next().map(|&byte| {
+  263|  1.50k|    fn next(&mut self) -> Option<u8> {
+  264|  1.50k|        self.bytes.next().map(|&byte| {
   265|       |            if byte == b'%' {
   266|       |                after_percent_sign(&mut self.bytes).unwrap_or(byte)
   267|       |            } else {
   268|       |                byte
   269|       |            }
   270|       |        })
-  271|   123k|    }
+  271|  1.50k|    }
 _RNvXs1_CsaQ98foBM0gP_16percent_encodingNtB5_13PercentDecodeNtNtNtNtCs6SNw0SRvItZ_4core4iter6traits8iterator8Iterator9size_hint:
-  273|    683|    fn size_hint(&self) -> (usize, Option<usize>) {
-  274|    683|        let bytes = self.bytes.len();
-  275|    683|        ((bytes + 2) / 3, Some(bytes))
-  276|    683|    }
+  273|     54|    fn size_hint(&self) -> (usize, Option<usize>) {
+  274|     54|        let bytes = self.bytes.len();
+  275|     54|        ((bytes + 2) / 3, Some(bytes))
+  276|     54|    }
 _RNvXs2_CsaQ98foBM0gP_16percent_encodingINtNtCshDtJu3Ru83O_5alloc6borrow3CowShEINtNtCs6SNw0SRvItZ_4core7convert4FromNtB5_13PercentDecodeE4from:
-  281|  1.05k|    fn from(iter: PercentDecode<'a>) -> Self {
-  282|  1.05k|        match iter.if_any() {
-  283|    319|            Some(vec) => Cow::Owned(vec),
-  284|    734|            None => Cow::Borrowed(iter.bytes.as_slice()),
+  281|    285|    fn from(iter: PercentDecode<'a>) -> Self {
+  282|    285|        match iter.if_any() {
+  283|     65|            Some(vec) => Cow::Owned(vec),
+  284|    220|            None => Cow::Borrowed(iter.bytes.as_slice()),
   285|       |        }
-  286|  1.05k|    }
+  286|    285|    }
 
-_RNCNvNvCsdxeCEj5z00U_14static_resolve1__19___libfuzzer_sys_run0B5_:
-   29|   147k|            !seg.chars().any(|c| c.is_control()),
-_RNCNvNvCsdxeCEj5z00U_14static_resolve1__19___libfuzzer_sys_runs_0B5_:
-   39|  70.9k|            .any(|c| matches!(c, std::path::Component::ParentDir)),
+_RNCNvNvCs3zMdlecYlxj_14static_resolve1__19___libfuzzer_sys_run0B5_:
+   29|  7.59k|            !seg.chars().any(|c| c.is_control()),
+_RNCNvNvCs3zMdlecYlxj_14static_resolve1__19___libfuzzer_sys_runs_0B5_:
+   39|  4.43k|            .any(|c| matches!(c, std::path::Component::ParentDir)),
 
-_RNvNtNtCsOmTKQdZnin_4verd6router9normalize14normalize_path:
-   37|  1.05k|pub fn normalize_path(raw: &str) -> Result<String, NormalizeError> {
-   38|  1.05k|    let decoded = percent_encoding::percent_decode_str(raw)
-   39|  1.05k|        .decode_utf8()
-   40|  1.05k|        .map_err(|_| NormalizeError::Utf8)?;
-   41|    820|    if decoded.contains('\0') {
-   42|     50|        return Err(NormalizeError::Nul);
-   43|    770|    }
-   44|    770|    if decoded.chars().any(|c| c.is_control()) {
-   45|     30|        return Err(NormalizeError::Control);
-   46|    740|    }
-   47|    740|    let had_trailing_slash = decoded.ends_with('/') && decoded.len() > 1;
-   48|    740|    let mut out: Vec<&str> = Vec::new();
-   49|  99.1k|    for segment in decoded.split('/') {
-   50|  99.1k|        match segment {
-   51|  99.1k|            "" | "." => {}
-   52|  84.9k|            ".." => {
-   53|  11.4k|                out.pop();
-   54|  11.4k|            }
-   55|  73.4k|            seg => out.push(seg),
+_RNvNtNtCs4vRcMGCgR5c_4verd6router9normalize14normalize_path:
+   37|    285|pub fn normalize_path(raw: &str) -> Result<String, NormalizeError> {
+   38|    285|    let decoded = percent_encoding::percent_decode_str(raw)
+   39|    285|        .decode_utf8()
+   40|    285|        .map_err(|_| NormalizeError::Utf8)?;
+   41|    259|    if decoded.contains('\0') {
+   42|     19|        return Err(NormalizeError::Nul);
+   43|    240|    }
+   44|    240|    if decoded.chars().any(|c| c.is_control()) {
+   45|     11|        return Err(NormalizeError::Control);
+   46|    229|    }
+   47|    229|    let had_trailing_slash = decoded.ends_with('/') && decoded.len() > 1;
+   48|    229|    let mut out: Vec<&str> = Vec::new();
+   49|  5.46k|    for segment in decoded.split('/') {
+   50|  5.46k|        match segment {
+   51|  5.46k|            "" | "." => {}
+   52|  4.10k|            ".." => {
+   53|    389|                out.pop();
+   54|    389|            }
+   55|  3.71k|            seg => out.push(seg),
    56|       |        }
    57|       |    }
-   58|    740|    let mut path = String::with_capacity(decoded.len());
-   59|    740|    path.push('/');
-   60|    740|    path.push_str(&out.join("/"));
-   61|    740|    if had_trailing_slash && !path.ends_with('/') {
-   62|    117|        path.push('/');
-   63|    623|    }
-   64|    740|    Ok(path)
-   65|  1.05k|}
-_RNCNvNtNtCsOmTKQdZnin_4verd6router9normalize14normalize_paths_0B7_:
-   44|   282k|    if decoded.chars().any(|c| c.is_control()) {
+   58|    229|    let mut path = String::with_capacity(decoded.len());
+   59|    229|    path.push('/');
+   60|    229|    path.push_str(&out.join("/"));
+   61|    229|    if had_trailing_slash && !path.ends_with('/') {
+   62|     13|        path.push('/');
+   63|    216|    }
+   64|    229|    Ok(path)
+   65|    285|}
+_RNCNvNtNtCs4vRcMGCgR5c_4verd6router9normalize14normalize_paths_0B7_:
+   44|  14.2k|    if decoded.chars().any(|c| c.is_control()) {
 
