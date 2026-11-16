@@ -26,6 +26,11 @@ workflow publishes the matching section as the GitHub release notes.
   doc placeholders like `http://…` that can't be filtered, and every
   real URL in it is already checked in the `.md` sources) plus the
   `api.cloudflare.com` API base that always 404s anonymous GETs.
+- **Zizmor workflow audit back to green** — upstream
+  `dtolnay/rust-toolchain` moved its `stable` branch, orphaning the
+  pinned commit (`impostor-commit` errors in 14 workflows); the pin is
+  updated to the new head and stale `# master` version comments
+  corrected to `# v1` to match the tag the commit actually points at.
 
 ## [1.2.0] - 2026-11-14
 
