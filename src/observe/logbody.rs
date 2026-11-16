@@ -165,22 +165,17 @@ mod tests {
             first_request_done: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             read_gate: crate::server::timeout::DeadlineGate {
                 active: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(1)),
-                off: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-                armed: std::sync::Arc::new(std::sync::Mutex::new(None)),
-                read_waker: std::sync::Arc::new(std::sync::Mutex::new(None)),
-                send_armed: std::sync::Arc::new(std::sync::Mutex::new(None)),
+                ..crate::server::timeout::DeadlineGate::default()
             },
             conn_guard: crate::server::ConnGuard::for_test("127.0.0.1".parse().unwrap()),
+            abort_socket: None,
         }
     }
 
     fn gate() -> crate::server::timeout::DeadlineGate {
         crate::server::timeout::DeadlineGate {
             active: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(1)),
-            off: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            armed: std::sync::Arc::new(std::sync::Mutex::new(None)),
-            read_waker: std::sync::Arc::new(std::sync::Mutex::new(None)),
-            send_armed: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            ..crate::server::timeout::DeadlineGate::default()
         }
     }
 

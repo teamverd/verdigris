@@ -15,6 +15,24 @@ use crate::observe::{self, RequestId};
 use crate::router::normalize::{self, NormalizeError};
 use crate::server::Runtime;
 
+/// Marker + service error for "close the connection without
+/// responding" (`path_deny.close`, Caddy `abort` parity). A middleware
+/// plants it in the early response's extensions; [`handle`] spots it,
+/// emits the access record itself (there is no response body to wrap),
+/// force-shuts the socket via `ConnCtx::abort_socket` (hyper alone only
+/// RST_STREAMs an h2 stream — the connection must die), and returns it
+/// as the service error — nothing is ever written.
+#[derive(Debug, Clone)]
+pub struct Abort;
+
+impl std::fmt::Display for Abort {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("request aborted by configuration")
+    }
+}
+
+impl std::error::Error for Abort {}
+
 /// Per-connection context shared with every request on the connection.
 #[derive(Clone)]
 pub struct ConnCtx {
@@ -37,15 +55,22 @@ pub struct ConnCtx {
     /// upgraded tunnel keeps counting against connection limits until
     /// it actually closes.
     pub conn_guard: crate::server::ConnGuard,
+    /// A second handle on the connection socket, force-closed by
+    /// [`Abort`]-marked responses. The service error alone drops an h1
+    /// connection, but hyper maps service errors to a per-stream
+    /// RST_STREAM on h2 and keeps the connection alive — `close = true`
+    /// promises connection teardown on both protocols.
+    pub abort_socket: Option<Arc<std::net::TcpStream>>,
 }
 
 /// Entry point for every request, called by hyper per request on a
-/// connection. Never fails: all errors become responses.
+/// connection. Only [`Abort`] escapes as an error — every other failure
+/// becomes a response.
 pub async fn handle(
     req: http::Request<Incoming>,
     ctx: ConnCtx,
     rt: Arc<Runtime>,
-) -> Result<http::Response<BoxBody>, std::convert::Infallible> {
+) -> Result<http::Response<BoxBody>, Abort> {
     let started = Instant::now();
     ctx.request_counter.fetch_add(1, Ordering::Relaxed);
     // the response cycle owns the connection until its body ends —
@@ -79,6 +104,24 @@ pub async fn handle(
         Ok(r) => r,
         Err(resp) => resp, // early-exit responses travel the error channel
     };
+
+    if response.extensions().get::<Abort>().is_some() {
+        // No response body means no AccessLogBody to emit the record —
+        // log it here, with the connection-close convention status 444
+        // (nginx `return 444`), then let the service error drop the conn.
+        log.finalize(started, 444, 0);
+        rt.access.log(&log);
+        crate::observe::metrics::request_done(&log);
+        // h2 keeps the connection up past a service error (per-stream
+        // RST_STREAM); `close = true` means the connection dies.
+        if let Some(tcp) = &ctx.abort_socket {
+            let _ = tcp.shutdown(std::net::Shutdown::Both);
+        }
+        ctx.read_gate.active.fetch_sub(1, Ordering::Release);
+        ctx.read_gate.wake_reader();
+        ctx.first_request_done.store(true, Ordering::Relaxed);
+        return Err(Abort);
+    }
 
     finish_response(&mut response, &rt, &req_id);
     ctx.first_request_done.store(true, Ordering::Relaxed);
@@ -213,6 +256,18 @@ async fn pipeline(
         }
         resp
     };
+
+    // 5.9 path deny — a listed path is a bad request on any route that
+    // didn't opt out; needs no client IP so it precedes the IP ACL
+    if let Some(pd) = &route.middleware.path_deny
+        && let Some(status) = pd.check(&normalized)
+    {
+        return Err(early(if pd.close {
+            abort_response()
+        } else {
+            error_response(status, "path denied")
+        }));
+    }
 
     // 6. ip acl
     if route.middleware.check_ip(client_ip).is_err() {
@@ -516,6 +571,16 @@ pub fn error_response(status: http::StatusCode, msg: &str) -> http::Response<Box
     resp
 }
 
+/// A response that exists only to carry the [`Abort`] marker — the
+/// status is logging-only (`444` connection-closed convention); nothing
+/// is ever written to the client.
+pub fn abort_response() -> http::Response<BoxBody> {
+    let mut resp = http::Response::new(body::empty());
+    *resp.status_mut() = http::StatusCode::from_u16(444).unwrap_or(http::StatusCode::FORBIDDEN);
+    resp.extensions_mut().insert(Abort);
+    resp
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -672,6 +737,7 @@ respond = { status = 200, body = "hi" }
                         conn_guard: crate::server::ConnGuard::for_test(
                             "127.0.0.1".parse().unwrap(),
                         ),
+                        abort_socket: None,
                     };
                     handle(req, ctx, rt).await
                 }

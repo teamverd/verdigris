@@ -162,6 +162,7 @@ async fn serve_conn(
         first_request_done: first_request_done.clone(),
         read_gate,
         conn_guard,
+        abort_socket: watchdog_tcp,
     };
     crate::observe::metrics::conn_active(1.0);
     let svc = service_fn(|req| {
@@ -198,5 +199,9 @@ async fn serve_conn(
     if let Err(e) = conn.await {
         tracing::debug!(%peer, error = %e, "connection error");
     }
+    // the conn future is done — release deadline watchdogs' dup'd socket
+    // fd so the last close reaches the peer now, not when their sleep
+    // ends (this also covers upgrade dispatch and graceful drain).
+    ctx.read_gate.conn_ended();
     crate::observe::metrics::conn_active(-1.0);
 }

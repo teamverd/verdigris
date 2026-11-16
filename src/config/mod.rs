@@ -62,6 +62,10 @@ pub enum LoadError {
         "{0}: key {1:?} conflicts with a value already set by {2} (arrays append; scalars must agree)"
     )]
     MergeConflict(PathBuf, String, String),
+    /// A `path_deny` list file could not be read or parsed — same
+    /// contract as a missing `include` target.
+    #[error("{0}: {1}: {2}")]
+    PathList(PathBuf, String, String),
 }
 
 const MAX_INCLUDE_DEPTH: usize = 8;
@@ -82,6 +86,9 @@ pub struct Loaded {
     pub interpolated: std::collections::HashSet<String>,
     /// Files referenced by `${file:…}` markers.
     pub file_refs: Vec<PathBuf>,
+    /// `path_deny` list files read while loading — each is a reload
+    /// trigger for `--watch`, like `${file:}` targets.
+    pub deny_files: Vec<PathBuf>,
 }
 
 impl Loaded {
@@ -103,7 +110,12 @@ impl Loaded {
     /// What `--watch` needs to follow this configuration on disk.
     pub fn watch_plan(&self) -> WatchPlan {
         let mut dirs = std::collections::BTreeSet::new();
-        for p in self.sources.iter().chain(self.file_refs.iter()) {
+        for p in self
+            .sources
+            .iter()
+            .chain(self.file_refs.iter())
+            .chain(self.deny_files.iter())
+        {
             if let Some(parent) = p.parent()
                 && !parent.as_os_str().is_empty()
             {
@@ -116,6 +128,7 @@ impl Loaded {
                 .sources
                 .iter()
                 .chain(self.file_refs.iter())
+                .chain(self.deny_files.iter())
                 .cloned()
                 .collect(),
             include_dirs: self.watch_dirs.iter().cloned().collect(),
@@ -200,6 +213,8 @@ fn load_inner(path: &Path, root_text: Option<&str>) -> Result<Loaded, LoadError>
             ),
         )
     })?;
+    let mut config = config;
+    resolve_path_denies(&mut config, &origins, path, &mut report)?;
     let mut diagnostics = validate(&config);
     for d in &mut diagnostics {
         d.source = origin_for(&config, &origins, &d.path);
@@ -212,7 +227,70 @@ fn load_inner(path: &Path, root_text: Option<&str>) -> Result<Loaded, LoadError>
         watch_dirs: report.watch_dirs,
         interpolated: report.interpolated,
         file_refs: report.file_refs.into_iter().map(|(_, p)| p).collect(),
+        deny_files: report.deny_files,
     })
+}
+
+/// Read every `path_deny.file` now — a missing or unparsable list is a
+/// load error like a missing `include` — storing the parsed entries on
+/// the block (`loaded`) so validation and the middleware build share
+/// one read. Each file joins `report.deny_files` for `--watch` (the
+/// canonical path plus the configured spelling, mirroring `file_refs`,
+/// so symlinked and renamed lists both trigger reloads). `file` was
+/// already anchored onto its fragment's directory by `rebase_paths`.
+fn resolve_path_denies(
+    cfg: &mut Config,
+    origins: &std::collections::HashMap<String, PathBuf>,
+    root: &Path,
+    report: &mut LoadReport,
+) -> Result<(), LoadError> {
+    for (i, site) in cfg.site.iter_mut().enumerate() {
+        let label = validate::site_label(i, site);
+        let mut slots: Vec<(String, String, &mut Option<model::PathDenyConfig>)> =
+            Vec::with_capacity(site.route.len() + 1);
+        slots.push((
+            format!("site.{i}.path_deny"),
+            format!("{label}.path_deny"),
+            &mut site.path_deny,
+        ));
+        for (j, route) in site.route.iter_mut().enumerate() {
+            slots.push((
+                format!("site.{i}.route.{j}.path_deny"),
+                format!("{label}.route[{j}].path_deny"),
+                &mut route.path_deny,
+            ));
+        }
+        for (dotted, display, slot) in slots {
+            let Some(pd) = slot else { continue };
+            // a disabled block's file is dead config — validate warns,
+            // so don't make it fatal by reading it here
+            let Some(file) = pd.file.clone().filter(|_| pd.enabled) else {
+                continue;
+            };
+            let source = || dotted_origin(origins, &dotted).unwrap_or_else(|| root.to_path_buf());
+            let text = std::fs::read_to_string(&file).map_err(|e| {
+                LoadError::PathList(
+                    source(),
+                    display.clone(),
+                    format!("cannot read {}: {e}", file.display()),
+                )
+            })?;
+            let entries = crate::router::normalize::parse_deny_list(&text).map_err(|e| {
+                LoadError::PathList(
+                    source(),
+                    display.clone(),
+                    format!("{}: {e}", file.display()),
+                )
+            })?;
+            pd.loaded = Some(std::sync::Arc::new(entries));
+            let canon = file.canonicalize().unwrap_or_else(|_| file.clone());
+            report.deny_files.push(canon.clone());
+            if canon != file {
+                report.deny_files.push(file);
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Key-name *segments* that smell secret-bearing — the key is split on
@@ -394,6 +472,12 @@ const PATH_FIELDS: &[&str] = &[
     "site.*.route.*.auth.basic",
     "site.*.auth.basic.htpasswd",
     "site.*.route.*.auth.basic.htpasswd",
+    // `path_deny = "list.txt"` shorthand — the scalar IS the list file;
+    // `paths` entries are request paths, deliberately not anchored
+    "site.*.path_deny",
+    "site.*.path_deny.file",
+    "site.*.route.*.path_deny",
+    "site.*.route.*.path_deny.file",
     "cache.*.disk_path",
     "acme.storage",
     "acme.ca_roots",
@@ -665,16 +749,14 @@ fn display_to_dotted(cfg: &Config, display: &str) -> Option<String> {
     Some(out.join("."))
 }
 
-/// Which file set the value a diagnostic points at — via merged dotted
-/// leaf paths in `origins`. An exact leaf hit wins; otherwise the file
-/// owning the most descendant leaves represents "who set this subtree".
-fn origin_for(
-    cfg: &Config,
+/// Which file owns `dotted` — an exact leaf hit wins; otherwise the
+/// file owning the most descendant leaves represents "who set this
+/// subtree".
+fn dotted_origin(
     origins: &std::collections::HashMap<String, PathBuf>,
-    display: &str,
+    dotted: &str,
 ) -> Option<PathBuf> {
-    let dotted = display_to_dotted(cfg, display)?;
-    if let Some(p) = origins.get(&dotted) {
+    if let Some(p) = origins.get(dotted) {
         return Some(p.clone());
     }
     let prefix = format!("{dotted}.");
@@ -688,6 +770,17 @@ fn origin_for(
         .into_iter()
         .max_by_key(|(_, n)| *n)
         .map(|(p, _)| p.clone())
+}
+
+/// Which file set the value a diagnostic points at — via merged dotted
+/// leaf paths in `origins`.
+fn origin_for(
+    cfg: &Config,
+    origins: &std::collections::HashMap<String, PathBuf>,
+    display: &str,
+) -> Option<PathBuf> {
+    let dotted = display_to_dotted(cfg, display)?;
+    dotted_origin(origins, &dotted)
 }
 
 /// Paths of every array node in a document → its element count. Used to
@@ -762,6 +855,9 @@ struct LoadReport {
     /// `${file:…}` targets paired with the document-local config path
     /// that referenced each.
     file_refs: Vec<(String, PathBuf)>,
+    /// `path_deny` list files read during the populate pass — reload
+    /// triggers for `--watch`.
+    deny_files: Vec<PathBuf>,
     /// Source files containing literal (non-interpolated) secret
     /// values — per-file input to the permission diagnostics.
     files_with_secrets: std::collections::HashSet<PathBuf>,
@@ -2478,6 +2574,10 @@ proxy = "app"
                     "proxy.request_headers.remove",
                     "[[site]]\n[[site.route]]\n[site.route.proxy]\nupstream = \"http://x:1\"\n[site.route.proxy.request_headers]\nremove = \"x-a\"",
                 ),
+                (
+                    "path_deny.paths",
+                    "[[site]]\nroot = \"/tmp\"\n[site.path_deny]\npaths = \"/.env\"",
+                ),
             ] {
                 load_str(body).unwrap_or_else(|e| panic!("{field} should take a scalar: {e}"));
             }
@@ -3315,6 +3415,59 @@ response_headers = { enabled = false }
                 Ok(_) => panic!("${{file:}} under basic should fail"),
             }
 
+            // path_deny = "list.txt" → { file } — a path field anchored
+            // like `basic = "x.htpasswd"`; the table's `paths` are
+            // request paths, not anchored
+            let dir = tempfile::tempdir().unwrap();
+            write(dir.path(), "deny.txt", "/.env\n");
+            let cfg = write(
+                dir.path(),
+                "verd.toml",
+                "[[site]]\nroot = \"/tmp\"\npath_deny = \"deny.txt\"\n[[site.route]]\nrespond = 200\npath_deny = { paths = [\"/a\", \"/b*\"] }\n",
+            );
+            let l = load(&cfg).unwrap();
+            let site_pd = l.config.site[0].path_deny.as_ref().unwrap();
+            assert_eq!(
+                site_pd.file.as_deref(),
+                Some(dir.path().join("deny.txt").as_path())
+            );
+            assert!(site_pd.loaded.is_some());
+            let route_pd = l.config.site[0].route[0].path_deny.as_ref().unwrap();
+            assert_eq!(route_pd.paths, ["/a", "/b*"]);
+            // a bare list is rejected — `["a.txt","b.txt"]` reads as
+            // files, so entries must spell `{ paths = […] }`
+            assert!(matches!(
+                load_str(
+                    "[[site]]\nroot = \"/tmp\"\n[[site.route]]\nrespond = 200\npath_deny = [\"/a\"]\n"
+                ),
+                Err(LoadError::Schema(_, _))
+            ));
+            // `path_deny = false` is the route opt-out, and
+            // `{ enabled = false, file = … }` warns as dead config
+            let l = load_str(
+                "[[site]]\nroot = \"/tmp\"\n[[site.route]]\nrespond = 200\npath_deny = false\n",
+            )
+            .unwrap();
+            assert!(
+                !l.config.site[0].route[0]
+                    .path_deny
+                    .as_ref()
+                    .unwrap()
+                    .enabled
+            );
+            let l = load_str(
+                "[[site]]\nroot = \"/tmp\"\npath_deny = { enabled = false, file = \"deny.txt\" }\n",
+            )
+            .unwrap();
+            assert!(
+                l.diagnostics
+                    .iter()
+                    .any(|d| d.severity == Severity::Warning
+                        && d.message.contains("enabled = false")),
+                "{:?}",
+                l.diagnostics
+            );
+
             // wrong types are schema errors, not silent drops
             for body in [
                 "[[site]]\nroot = \"/tmp\"\n[[site.route]]\nstatic = \"/tmp\"\nmatch = 5",
@@ -3322,6 +3475,7 @@ response_headers = { enabled = false }
                 "[[site]]\nroot = \"/tmp\"\n[[site.route]]\nrespond = 200\nauth = { bearer = 5 }",
                 "[[site]]\nroot = \"/tmp\"\n[[site.route]]\nrespond = 200\nauth = { basic = 5 }",
                 "[[site]]\nroot = \"/tmp\"\n[[site.route]]\nrespond = 200\nauth = { basic = [\"a\", \"b\"] }",
+                "[[site]]\nroot = \"/tmp\"\n[[site.route]]\nrespond = 200\npath_deny = 5",
             ] {
                 match load_str(body) {
                     Err(LoadError::Schema(_, _)) => {}
@@ -3544,6 +3698,175 @@ response_headers = { enabled = false }
         }
     }
 
+    #[test]
+    fn path_deny_file_loads_and_anchors() {
+        let dir = tempfile::tempdir().unwrap();
+        let frag_dir = dir.path().join("conf.d");
+        std::fs::create_dir(&frag_dir).unwrap();
+        // the list lives next to the fragment that references it —
+        // dir/deny.txt deliberately does not exist, so a root-anchored
+        // read would fail outright
+        write(
+            &frag_dir,
+            "deny.txt",
+            "# bad paths\n/.env\n\npath /admin*\nwp-config.php\n",
+        );
+        write(
+            &frag_dir,
+            "site.toml",
+            r#"[[site]]
+default = true
+tls = "off"
+respond = "ok"
+path_deny = { file = "deny.txt", status = 404 }
+"#,
+        );
+        let path = write(dir.path(), "verd.toml", "include = [\"conf.d\"]\n");
+        let loaded = load(&path).unwrap();
+        assert!(loaded.is_valid(), "{:?}", loaded.diagnostics);
+
+        let pd = loaded.config.site[0].path_deny.as_ref().unwrap();
+        assert_eq!(
+            pd.file.as_deref(),
+            Some(frag_dir.join("deny.txt").as_path())
+        );
+        let entries = pd.loaded.as_ref().unwrap();
+        use crate::router::normalize::DenyEntry::*;
+        assert_eq!(
+            entries.as_slice(),
+            [
+                Exact("/.env".into()),
+                Prefix("/admin".into()),
+                Exact("/wp-config.php".into()),
+            ]
+        );
+
+        // the list file joins the --watch trigger set (canonical AND
+        // configured spelling) with its parent dir watched
+        let plan = loaded.watch_plan();
+        let canon = frag_dir.join("deny.txt").canonicalize().unwrap();
+        assert!(plan.files.contains(&canon));
+        assert!(plan.files.contains(&frag_dir.join("deny.txt")));
+        assert!(plan.dirs.contains(&frag_dir));
+
+        // `verd config` shows the file reference, not expanded entries
+        let dump = dump(&loaded.config).unwrap();
+        assert!(dump.contains("deny.txt"), "{dump}");
+        assert!(!dump.contains("/.env"), "{dump}");
+    }
+
+    #[test]
+    fn path_deny_shorthand_forms_through_load() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "deny.txt", "/.env\n");
+        // the bare-string form names a file and is rebased like
+        // `static = "./pub"`; `paths` are request paths, NOT files
+        let path = write(
+            dir.path(),
+            "verd.toml",
+            r#"[[site]]
+default = true
+tls = "off"
+respond = "ok"
+path_deny = "deny.txt"
+
+[[site]]
+hosts = ["b.example"]
+tls = "off"
+respond = "ok"
+path_deny = { paths = ["/x", "/y*"] }
+
+[[site.route]]
+prefix = "/free"
+respond = "ok"
+path_deny = false
+"#,
+        );
+        let loaded = load(&path).unwrap();
+        assert!(loaded.is_valid(), "{:?}", loaded.diagnostics);
+        let site_pd = loaded.config.site[0].path_deny.as_ref().unwrap();
+        assert!(site_pd.loaded.is_some(), "file entries must be loaded");
+        let site_pd2 = loaded.config.site[1].path_deny.as_ref().unwrap();
+        assert_eq!(site_pd2.paths, vec!["/x", "/y*"]);
+        // request paths are not filesystem-anchored
+        assert_eq!(site_pd2.file, None);
+        let opt_out = loaded.config.site[1].route[0].path_deny.as_ref().unwrap();
+        assert!(!opt_out.enabled);
+    }
+
+    #[test]
+    fn path_deny_missing_file_is_a_load_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write(
+            dir.path(),
+            "verd.toml",
+            r#"[[site]]
+default = true
+tls = "off"
+respond = "ok"
+path_deny = { file = "nope.txt" }
+"#,
+        );
+        match load(&path) {
+            Err(LoadError::PathList(src, field, msg)) => {
+                assert!(src.ends_with("verd.toml"), "{src:?}");
+                assert!(field.contains("path_deny"), "{field}");
+                assert!(msg.contains("nope.txt"), "{msg}");
+            }
+            Err(e) => panic!("{e}"),
+            Ok(_) => panic!("expected a path list load error"),
+        }
+    }
+
+    #[test]
+    fn path_deny_file_parse_error_names_line_and_source() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "deny.txt", "/.env\n*.php\n");
+        let frag_dir = dir.path().join("conf.d");
+        std::fs::create_dir(&frag_dir).unwrap();
+        write(
+            &frag_dir,
+            "site.toml",
+            "[[site]]\ndefault = true\ntls = \"off\"\nrespond = \"ok\"\npath_deny = { file = \"../deny.txt\" }\n",
+        );
+        let path = write(dir.path(), "verd.toml", "include = [\"conf.d\"]\n");
+        match load(&path) {
+            Err(LoadError::PathList(src, field, msg)) => {
+                // the fragment set the field — it owns the diagnostic
+                assert!(src.ends_with("site.toml"), "{src:?}");
+                assert!(field.contains("path_deny"), "{field}");
+                assert!(msg.contains("line 2"), "{msg}");
+                assert!(msg.contains("deny.txt"), "{msg}");
+            }
+            Err(e) => panic!("{e}"),
+            Ok(_) => panic!("expected a path list parse error"),
+        }
+    }
+
+    #[test]
+    fn path_deny_file_ref_inside_file_is_teaching_error() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "deny.txt", "/.env\n");
+        let path = write(
+            dir.path(),
+            "verd.toml",
+            r#"[[site]]
+default = true
+tls = "off"
+respond = "ok"
+path_deny = { file = "${file:deny.txt}" }
+"#,
+        );
+        match load(&path) {
+            Err(LoadError::InterpolatedPathField(_, at, target)) => {
+                assert!(at.contains("path_deny"), "{at}");
+                assert!(target.contains("deny.txt"), "{target}");
+            }
+            Err(e) => panic!("{e}"),
+            Ok(_) => panic!("expected an interpolated-path-field error"),
+        }
+    }
+
     /// "Every config item is tested", mechanically: the generated JSON
     /// schema enumerates every accepted field path, and the kitchen-sink
     /// config below must *set* each one in its TOML source — a path that
@@ -3723,6 +4046,7 @@ response_headers = { enabled = false }
             write(dir.path(), "cert.pem", &cert);
             write(dir.path(), "key.pem", &key);
             write(dir.path(), "users.htpasswd", "u:$argon2id$x\n");
+            write(dir.path(), "deny.txt", "# bad paths\n/.env\npath /admin*\n");
             let www = dir.path().join("www");
             std::fs::create_dir(&www).unwrap();
             for page in ["i.html", "f.html", "404.html", "5xx.html"] {
@@ -3822,6 +4146,7 @@ response_headers = {{ enabled = true, set = {{ x-a = "1" }}, add = {{ x-b = "2" 
 security = {{ enabled = false, hsts = true, hsts_max_age = "10d", hsts_subdomains = true, content_type_options = true, frame_options = "DENY", referrer_policy = "origin", csp = "default-src 'none'", cross_domain_policy = "master-only" }}
 ip_allow = ["10.0.0.0/8", "10.1.0.0/16"]
 ip_deny = ["10.0.0.9"]
+path_deny = {{ enabled = true, file = "{dir}/deny.txt", paths = ["/.env", "/wp-*"], status = 404 }}
 timeouts = {{ header_read = "10s", body_read = "30s", idle = "40s", send = "30s", request_deadline = "90s" }}
 limits = {{ header_bytes = "8KiB", body_bytes = "4MiB" }}
 
@@ -3842,6 +4167,7 @@ response_headers = {{ enabled = true, set = {{ x = "1" }}, add = {{ y = "2" }}, 
 security = {{ enabled = false, hsts = true, hsts_max_age = "10d", hsts_subdomains = true, content_type_options = true, frame_options = "DENY", referrer_policy = "origin", csp = "default-src 'self'", cross_domain_policy = "all" }}
 ip_allow = ["127.0.0.1"]
 ip_deny = ["10.9.9.9"]
+path_deny = {{ enabled = true, file = "{dir}/deny.txt", paths = ["/secret"], status = 403 }}
 timeouts = {{ header_read = "5s", body_read = "10s", idle = "20s", send = "10s", request_deadline = "60s" }}
 limits = {{ header_bytes = "4KiB", body_bytes = "1MiB" }}
 
@@ -3869,6 +4195,16 @@ match = {{ methods = ["POST", "PUT"], headers = {{ X-T = "re:^v", X-E = "" }}, q
 priority = 5
 respond = "ok"
 auth = {{ basic = {{ users = {{ v = "$argon2id$x" }}, realm = "r" }} }}
+path_deny = {{ paths = ["/denyme", "/bot*"], close = true }}
+
+[[site.route]]
+prefix = "/rh-off"
+respond = 200
+path_deny = false
+
+[[site.route]]
+prefix = "/gone"
+close = true
 
 [[site.route]]
 prefix = "/named"
@@ -3921,6 +4257,7 @@ hosts = ["resp.example"]
 tls = "off"
 auth = {{ bearer = ["bs1"] }}
 respond = {{ status = 202, body = "accepted", headers = {{ x-r = "1" }} }}
+path_deny = {{ paths = ["/probe*"], close = true }}
 
 [[site]]
 hosts = ["r1.example"]

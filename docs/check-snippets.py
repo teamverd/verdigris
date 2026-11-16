@@ -76,6 +76,9 @@ def main() -> int:
             body = wrap(m.group(1).strip())
             with tempfile.TemporaryDirectory() as td:
                 os.mkdir(os.path.join(td, "conf.d"))
+                # path_deny snippets name this list file; provide it so
+                # `verd validate`'s unreadable-file check passes
+                open(os.path.join(td, "bad-requests.txt"), "w").write("/.env\n")
                 p = os.path.join(td, "cfg.toml")
                 open(p, "w").write(body)
                 r = subprocess.run(

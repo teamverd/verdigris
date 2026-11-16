@@ -11,6 +11,26 @@ workflow publishes the matching section as the GitHub release notes.
 
 ## [Unreleased]
 
+### Added
+
+- **`path_deny` middleware: file-backed path denylist** — `site` and
+  `route` blocks reject requests whose normalized path matches a list
+  file (`path_deny = { file = "bad-requests.txt" }`, or the bare
+  `path_deny = "bad-requests.txt"` shorthand) and/or inline `paths`.
+  One entry per line with `#` comments, `path`-line prefixes, and `*`-
+  suffix prefix entries supported, so Caddy-exported lists work
+  verbatim; a site block covers every route including catch-alls, and
+  `path_deny = false` opts a route out. List files anchor to their
+  config file, join the `--watch` set, and `status` (default 403) must
+  be an error status. `close = true` drops the connection with no
+  response instead (Caddy `abort` parity; logged as status `444`).
+- **`route.close` handler: abort any request's connection** —
+  `close = true` is a fifth route handler (mutually exclusive with
+  `static`/`proxy`/`redirect`/`respond`): the connection drops with no
+  response on HTTP/1 and HTTP/2 — Caddy `abort` parity, logged as
+  `444`. Site-wide close is a `prefix = "/"` + `close` route or
+  `path_deny` with `paths = ["*"]`.
+
 ### Fixed
 
 - **Dead `.deb`/`.rpm` download links in the install docs** — the

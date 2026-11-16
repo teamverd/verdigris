@@ -28,6 +28,10 @@ pub enum Handler {
     Static(Static),
     /// Reverse proxy.
     Proxy(Proxy),
+    /// Drop the connection without responding (Caddy `abort` parity):
+    /// the response only carries the [`crate::server::service::Abort`]
+    /// marker — nothing is written.
+    Close,
 }
 
 impl Handler {
@@ -44,6 +48,7 @@ impl Handler {
             Self::Redirect(h) => h.handle(&req, ctx),
             Self::Static(h) => h.handle(req, ctx).await,
             Self::Proxy(h) => h.handle(req, ctx).await,
+            Self::Close => crate::server::service::abort_response(),
         }
     }
 }
@@ -90,6 +95,9 @@ pub fn build(
     if let Some(p) = &route.proxy {
         let proxy = Proxy::build(p, clusters, key).map_err(BuildError::Invalid)?;
         return Ok(Handler::Proxy(proxy));
+    }
+    if route.close {
+        return Ok(Handler::Close);
     }
     Err(BuildError::Missing)
 }
