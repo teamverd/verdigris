@@ -11,6 +11,8 @@ workflow publishes the matching section as the GitHub release notes.
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-11-16
+
 ### Added
 
 - **`path_deny` middleware: file-backed path denylist** — `site` and
@@ -1052,7 +1054,8 @@ reverse proxy with load balancing and retries, response caching
 (RAM/disk/hybrid), compression, rate limiting, CORS, security headers,
 admin API with atomic reloads, Prometheus metrics.
 
-[Unreleased]: https://github.com/teamverd/verdigris/compare/v1.2.0...HEAD
+[Unreleased]: https://github.com/teamverd/verdigris/compare/v1.3.0...HEAD
+[1.3.0]: https://github.com/teamverd/verdigris/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/teamverd/verdigris/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/teamverd/verdigris/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/teamverd/verdigris/compare/v0.4.1...v1.0.0
