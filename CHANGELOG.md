@@ -11,6 +11,22 @@ workflow publishes the matching section as the GitHub release notes.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Dead `.deb`/`.rpm` download links in the install docs** — the
+  examples under "Debian package"/"RPM package" pointed at
+  `v1.2.0`-tagged URLs whose asset names still said `1.0.0`
+  (`verd_1.0.0-1_amd64.deb`, `verd-1.0.0-1.x86_64.rpm`); they now use
+  the real `1.2.0` asset names.
+
+### Build & CI
+
+- **Weekly lychee link check passing again** — `lychee.toml` now
+  excludes the generated `llms-full.txt` (its plaintext scan flags
+  doc placeholders like `http://…` that can't be filtered, and every
+  real URL in it is already checked in the `.md` sources) plus the
+  `api.cloudflare.com` API base that always 404s anonymous GETs.
+
 ## [1.2.0] - 2026-11-14
 
 ### Security
