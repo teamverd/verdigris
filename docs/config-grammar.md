@@ -53,6 +53,7 @@ where one field dominates the table — they are a closed set:
 | `site.cors`/`route.cors` | `false` \| table | `CorsConfig{enabled,…}` |
 | `site.response_headers`/`route.response_headers` | `false` \| table | `HeaderOps{enabled,…}` |
 | `site.rate_limit`/`route.rate_limit` | `false` \| `"100/s"` \| table | `RateLimitConfig{key:"ip",…}` |
+| `site.path_deny`/`route.path_deny` | `false` \| `"list.txt"` \| table | `PathDenyConfig{file,…}` |
 | `site.cache`/`route.cache` | `false` \| `"store"` \| table | `RouteCache{store,…}` |
 | `site.compress`/`route.compress` | `true`/`false` \| `"alg"` \| `["alg",…]` \| table | `CompressConfig{algorithms}` |
 | `site.security`/`route.security` | `false` \| table | `RouteSecurity{enabled,…}` |
@@ -128,7 +129,7 @@ Simple string/scalar lists accept a single value as `["v"]` via the
 `static.index`, `static.try_files`, `*.remove` header lists
 (`response_headers.remove`, `proxy.request_headers.remove`),
 `trusted_proxies` (`server.` and `site.`), `rate_limit.exempt`,
-`cors.origins`/`methods`/`headers`/`expose`,
+`path_deny.paths`, `cors.origins`/`methods`/`headers`/`expose`,
 `compress.algorithms`/`types`, `vary_headers`.
 
 Network fields additionally accept **bare IPs** — `"10.0.0.1"` parses
@@ -166,12 +167,13 @@ opt-in); blocks that still need settings (`auth`'s method,
 `cache`'s store) error on them as usual.
 
 Route middleware blocks (`auth`, `cors`, `rate_limit`, `cache`,
-`compress`, `response_headers`, `security`) carry `enabled = true` by
-default; `enabled = false` is the opt-out that suppresses an inherited
-site-level default. The bare `false` spelling works for all of them —
-`auth = false`, `cors = false`, `rate_limit = false`,
-`response_headers = false`, `security = false` — and produces no
-dead-config warning (a bare `false` carries no settings). Settings
+`compress`, `response_headers`, `security`, `path_deny`) carry
+`enabled = true` by default; `enabled = false` is the opt-out that
+suppresses an inherited site-level default. The bare `false` spelling
+works for all of them — `auth = false`, `cors = false`,
+`rate_limit = false`, `response_headers = false`, `security = false`,
+`path_deny = false` — and produces no dead-config warning (a bare
+`false` carries no settings). Settings
 left inside a disabled *table* are dead config and `verd validate`
 warns. `server.server_header` takes `false` as its omit spelling
 (`""` also omits; `"off"` parses but is deprecated and warns).
@@ -186,9 +188,9 @@ sockets" and the validator requires at least one listener anyway.
 
 A site may carry the same middleware blocks as a route — `auth`,
 `cors`, `rate_limit`, `cache`, `compress`, `response_headers`,
-`ip_allow`, `ip_deny`, `timeouts`, `limits`, `security` — and every
-route inherits them, including the implicit `site.root`/`site.proxy`
-catch-alls. Resolution:
+`ip_allow`, `ip_deny`, `path_deny`, `timeouts`, `limits`, `security` —
+and every route inherits them, including the implicit
+`site.root`/`site.proxy` catch-alls. Resolution:
 
 - A route's own block wins whole-block (no field merge) — except
   `response_headers`, whose `set`/`add` maps union with route keys
@@ -211,9 +213,10 @@ Filesystem paths in config are relative to **the file that contains
 them** — the main file or an `include`d fragment — so a config tree
 moves as a unit. This covers `site.*.root`, `route.*.static` (scalar
 shorthand and `static.root` alike),
-`*.tls.cert`/`key`, `auth.basic.htpasswd`, `cache.*.disk_path`,
-`acme.storage`/`ca_roots`, `upstream.*.tls.ca`, `log.output`,
-`log.access.output`.
+`*.tls.cert`/`key`, `auth.basic.htpasswd`, `path_deny.file` (and the
+`path_deny = "list.txt"` scalar, which *is* the file),
+`cache.*.disk_path`, `acme.storage`/`ca_roots`, `upstream.*.tls.ca`,
+`log.output`, `log.access.output`.
 
 Deliberately *not* rebased: `static.error_pages` and
 `static.try_files` — they name paths inside `root`, not on the
@@ -330,6 +333,13 @@ Recorded with one-line rationale so they aren't re-litigated.
   paths; a CLI alias would duplicate them.
 - `error_pages` ranges (`"500-599"`) — the `"4xx"`/`"5xx"` class keys
   cover the common case with less syntax.
+- `path_deny = ["a", "b"]` bare list — its string shorthand already
+  means "a list file" (`auth.basic = "x.htpasswd"` precedent), so
+  `["a.txt", "b.txt"]` reads as two files but would expand to `paths`:
+  silent misparse either way. Inline entries spell `{ paths = […] }`.
+- `site.close` catch-all shorthand — a site-wide abort is already the
+  `prefix = "/"` + `close = true` route (or `path_deny`
+  `{ paths = ["*"], close = true }`); no fifth site shorthand.
 - Unix-domain listeners, `health.active.expect` multi-status — real
   features, not grammar; the admin-socket design is tracked in
   `docs/ROADMAP.md` (open risks).
@@ -387,8 +397,8 @@ whether a field actually does something:
 | `acme.*` | `acme/` (`mod.rs` issuance + renewal, `dns.rs` provider client, `storage.rs` persistence) |
 | `upstream.<name>.*` | `proxy/cluster.rs` (servers, `lb`, `dns`, `health`, `max_connections`), `proxy/` (`tls`, `timeouts`, `unavailable`) |
 | `cache.<name>.*` | `cache/` stores (`ram`/`disk`/`hybrid`, `policy`); route-side fields evaluated in `cache/stage.rs` (`bypass`, `ttl`, `stale_*`, `negative_ttl`, `x_cache`) and `cache/key.rs` (`vary_headers`); `middleware/` only resolves the store name and merges the `RouteCache` block |
-| `site.*` matchers/handlers | `router/` (`hosts`, `default`, routes, `priority`), `router/condition.rs` (`match` conditions), `handler/` (static/proxy/respond/redirect) |
-| `site.*`/`route.*` middleware | `middleware/` (auth, cors, rate_limit, ACL, headers, security, compress, cache) |
+| `site.*` matchers/handlers | `router/` (`hosts`, `default`, routes, `priority`), `router/condition.rs` (`match` conditions), `handler/` (static/proxy/respond/redirect/close) |
+| `site.*`/`route.*` middleware | `middleware/` (auth, cors, rate_limit, ACL, path_deny, headers, security, compress, cache) |
 | `site.trusted_proxies` | `server/service.rs` client-IP trust — overrides `server.trusted_proxies` for the site's requests |
 | `site.tls`, `redirect_https`, `redirect_host` | `tls/` cert loading, `acme/` for `"auto"`, `server/service.rs` HTTP→HTTPS upgrade (`redirect_https`, `redirect_host`) |
 | `route.*` | same consumers as `site.*`, narrowed to the route |

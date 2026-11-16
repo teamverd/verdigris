@@ -217,6 +217,141 @@ async fn respond_redirect_routing_and_shutdown() {
 }
 
 #[tokio::test]
+async fn path_deny_file_list_reaches_every_route() {
+    let dir = tempfile::tempdir().unwrap();
+    let list = dir.path().join("bad-requests.txt");
+    std::fs::write(
+        &list,
+        "# Caddy bad-requests.txt\n/.env\npath /admin*\nwp-config.php\n\n",
+    )
+    .unwrap();
+    // `respond` shorthand ⇒ the deny must reach the generated catch-all
+    // route; a route-level `path_deny = false` opts its matcher out
+    let cfg = format!(
+        r#"
+[server]
+server_header = "off"
+
+[[site]]
+hosts = ["example.test"]
+tls = "off"
+respond = "ok\n"
+path_deny = {{ file = "{list}", paths = ["/inline-secret"], status = 404 }}
+
+[[site.route]]
+exact = "/.env"
+path_deny = false
+respond = "allowed\n"
+"#,
+        list = list.display()
+    );
+    let (base, _admin, _rt, sd) = start(&cfg).await;
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap();
+    let status = |p: &str| {
+        let client = client.clone();
+        let base = base.clone();
+        let p = p.to_string();
+        async move {
+            client
+                .get(format!("{base}{p}"))
+                .header("host", "example.test")
+                .send()
+                .await
+                .unwrap()
+                .status()
+                .as_u16()
+        }
+    };
+
+    // file entries: exact, %-encoded and dot-segment spellings, `*` prefix
+    assert_eq!(status("/wp-config.php").await, 404);
+    assert_eq!(status("/%77p-config.php").await, 404);
+    assert_eq!(status("/x/../wp-config.php").await, 404);
+    assert_eq!(status("/administrator").await, 404);
+    // inline `paths` entry
+    assert_eq!(status("/inline-secret").await, 404);
+    // unlisted paths pass through to the catch-all
+    assert_eq!(status("/fine").await, 200);
+    // the opted-out route serves `/.env` even though the file lists it
+    let resp = client
+        .get(format!("{base}/.env"))
+        .header("host", "example.test")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    assert_eq!(resp.text().await.unwrap(), "allowed\n");
+    // …and its normalization twin `/%2eenv` also bypasses the list
+    assert_eq!(status("/%2eenv").await, 200);
+
+    sd.send(true).unwrap();
+}
+
+#[tokio::test]
+async fn path_deny_close_drops_the_connection() {
+    let cfg = r#"
+[server]
+server_header = "off"
+
+[[site]]
+hosts = ["example.test"]
+tls = "off"
+respond = "ok\n"
+path_deny = { paths = ["/.env"], close = true }
+
+[[site.route]]
+prefix = "/gone"
+close = true
+"#;
+    let (base, _admin, _rt, sd) = start(cfg).await;
+    let client = reqwest::Client::new();
+
+    // a listed path gets no response at all — the socket dies mid-request
+    // (Caddy `abort` parity); hyper reports the closed conn as a send
+    // error. The timeout guard matters: a conn that lingers until a
+    // read deadline fires would still "error" eventually — assert the
+    // close is prompt, not merely eventual.
+    let err = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        client
+            .get(format!("{base}/.env"))
+            .header("host", "example.test")
+            .send()
+            .await
+    })
+    .await
+    .expect("abort did not close the connection promptly")
+    .unwrap_err();
+    assert!(err.is_connect() || err.is_request(), "{err:?}");
+
+    // the `close` route handler drops the connection the same way
+    let err = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        client
+            .get(format!("{base}/gone"))
+            .header("host", "example.test")
+            .send()
+            .await
+    })
+    .await
+    .expect("close handler did not close the connection promptly")
+    .unwrap_err();
+    assert!(err.is_connect() || err.is_request(), "{err:?}");
+
+    // unlisted paths still serve normally on a fresh conn
+    let resp = client
+        .get(format!("{base}/fine"))
+        .header("host", "example.test")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    sd.send(true).unwrap();
+}
+
+#[tokio::test]
 async fn static_files_end_to_end() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();

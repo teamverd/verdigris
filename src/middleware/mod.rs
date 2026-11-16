@@ -1,7 +1,7 @@
 //! Per-route middleware, compiled once into a [`Middleware`] and executed in
 //! a fixed order on every request:
 //!
-//! `ip_acl → cors-preflight → auth → rate_limit → cache → handler → security → cors → headers → compress`
+//! `path_deny → ip_acl → cors-preflight → auth → rate_limit → cache → handler → security → cors → headers → compress`
 
 pub mod auth;
 pub mod compress;
@@ -21,6 +21,60 @@ use crate::middleware::auth::Auth;
 use crate::middleware::compress::Compress;
 use crate::middleware::cors::Cors;
 use crate::middleware::ratelimit::RateLimiter;
+use crate::router::normalize::DenyEntry;
+
+/// Compiled `path_deny`: normalized exact entries in a set plus
+/// literal-prefix entries; checked against the normalized request path
+/// before the IP ACL (it needs no client IP).
+#[derive(Debug)]
+pub struct PathDeny {
+    exact: std::collections::HashSet<String>,
+    prefixes: Vec<String>,
+    status: StatusCode,
+    /// Drop the connection without responding (`close = true`).
+    pub close: bool,
+}
+
+impl PathDeny {
+    /// Compile from config; bad entries (and a `file` that was never
+    /// read by `config::load` and is unreadable now) are build errors.
+    pub fn build(c: &cfg::PathDenyConfig) -> Result<Self, String> {
+        if !(400..=599).contains(&c.status) {
+            return Err(format!(
+                "status {} must be an error status (400–599)",
+                c.status
+            ));
+        }
+        let status =
+            StatusCode::from_u16(c.status).map_err(|_| format!("invalid status {}", c.status))?;
+        let mut exact = std::collections::HashSet::new();
+        let mut prefixes = Vec::new();
+        for e in c.entries()? {
+            match e {
+                DenyEntry::Exact(p) => {
+                    exact.insert(p);
+                }
+                DenyEntry::Prefix(p) => {
+                    if !prefixes.contains(&p) {
+                        prefixes.push(p);
+                    }
+                }
+            }
+        }
+        Ok(Self {
+            exact,
+            prefixes,
+            status,
+            close: c.close,
+        })
+    }
+
+    /// `Some(status)` when the normalized request path is denied.
+    pub fn check(&self, path: &str) -> Option<StatusCode> {
+        (self.exact.contains(path) || self.prefixes.iter().any(|p| path.starts_with(p.as_str())))
+            .then_some(self.status)
+    }
+}
 
 /// Compiled response-header manipulation (`set`/`add`/`remove`).
 #[derive(Debug, Default)]
@@ -217,6 +271,10 @@ pub struct Middleware {
     /// Denied client CIDRs, union of site and route rules (evaluated
     /// before allows).
     pub ip_deny: Vec<ipnet::IpNet>,
+    /// Path denylist; evaluated before the IP ACL — it needs no client
+    /// IP. `None` when neither site nor route configures one (or the
+    /// route opted out).
+    pub path_deny: Option<Arc<PathDeny>>,
     /// Authentication; runs before rate limiting so `identity` keys work.
     pub auth: Option<Auth>,
     /// CORS: preflight short-circuit + response decoration.
@@ -319,6 +377,9 @@ pub struct Factory {
     /// One shared limiter per site-level `rate_limit`, index-aligned
     /// with `config.site` — every route inheriting it shares buckets.
     site_limiters: Vec<Option<Arc<RateLimiter>>>,
+    /// One compiled `path_deny` per site-level list, index-aligned with
+    /// `config.site` — every route inheriting it shares the entry set.
+    site_denies: Vec<Option<Arc<PathDeny>>>,
     /// Named cache stores shared by routes.
     caches: std::collections::HashMap<String, Arc<crate::cache::Cache>>,
 }
@@ -336,7 +397,8 @@ impl Factory {
     ) -> Result<Self, String> {
         let mut limiters = Vec::new();
         let mut site_limiters = Vec::with_capacity(cfg.site.len());
-        for site in &cfg.site {
+        let mut site_denies = Vec::with_capacity(cfg.site.len());
+        for (si, site) in cfg.site.iter().enumerate() {
             match site.rate_limit.as_ref().filter(|rl| rl.enabled) {
                 Some(rl) => {
                     let rl = Arc::new(RateLimiter::build_site(rl)?);
@@ -345,12 +407,22 @@ impl Factory {
                 }
                 None => site_limiters.push(None),
             }
+            match site.path_deny.as_ref().filter(|pd| pd.enabled) {
+                Some(pd) => site_denies.push(Some(Arc::new(PathDeny::build(pd).map_err(|e| {
+                    format!(
+                        "{}.path_deny: {e}",
+                        crate::config::validate::site_label(si, site)
+                    )
+                })?))),
+                None => site_denies.push(None),
+            }
         }
         Ok(Self {
             trusted_proxies: cfg.server.trusted_proxies.clone(),
             security: cfg.server.security.clone(),
             limiters: Mutex::new(limiters),
             site_limiters,
+            site_denies,
             caches: crate::cache::Cache::build_all(cfg, prior.map(|p| p.caches()), mode)?,
         })
     }
@@ -403,6 +475,15 @@ impl Factory {
             Some(_) => None,
             None => self.site_limiters.get(site_idx).cloned().flatten(),
         };
+        // Route-level presence replaces the site list (like rate_limit);
+        // a present-but-disabled block is the opt-out.
+        let path_deny = match &route.path_deny {
+            Some(pd) if pd.enabled => Some(Arc::new(
+                PathDeny::build(pd).map_err(|e| format!("path_deny: {e}"))?,
+            )),
+            Some(_) => None,
+            None => self.site_denies.get(site_idx).cloned().flatten(),
+        };
         let compress = effective(&route.compress, &site.compress)
             .map(Compress::build)
             .transpose()?;
@@ -432,7 +513,15 @@ impl Factory {
                 $(if eff.$f.is_none() { eff.$f = site.$f.clone(); })*
             };
         }
-        inherit!(auth, cors, rate_limit, cache, compress, response_headers);
+        inherit!(
+            auth,
+            cors,
+            rate_limit,
+            cache,
+            compress,
+            response_headers,
+            path_deny
+        );
         if let Some(merged) = merged_ops {
             eff.response_headers = Some(merged);
         }
@@ -445,6 +534,7 @@ impl Factory {
                 .chain(route.ip_deny.iter())
                 .cloned()
                 .collect(),
+            path_deny,
             auth,
             cors,
             rate_limit,
@@ -584,6 +674,7 @@ mod tests {
             site_ip_allow: vec!["10.0.0.0/16".parse().unwrap()],
             ip_allow: vec!["10.0.0.0/8".parse().unwrap()],
             ip_deny: vec!["10.0.0.9/32".parse().unwrap()],
+            path_deny: None,
             auth: None,
             cors: None,
             rate_limit: None,
@@ -791,5 +882,105 @@ ip_deny = ["10.0.1.5/32"]
         );
         s.apply(&mut h, false);
         assert_eq!(h["x-frame-options"], "ALLOWALL");
+    }
+
+    #[test]
+    fn path_deny_build_and_check() {
+        let pd = cfg::PathDenyConfig {
+            paths: vec![
+                "/.env".into(),
+                "/admin*".into(),
+                "/%2e%2e/secret".into(),
+                "/dup//slash".into(),
+            ],
+            status: 404,
+            ..Default::default()
+        };
+        let d = PathDeny::build(&pd).unwrap();
+        // entries normalize like request paths
+        assert_eq!(d.check("/.env"), Some(StatusCode::NOT_FOUND));
+        assert_eq!(d.check("/secret"), Some(StatusCode::NOT_FOUND));
+        assert_eq!(d.check("/dup/slash"), Some(StatusCode::NOT_FOUND));
+        // prefix entries are literal — `/admin*` also hits /administrator
+        assert_eq!(d.check("/administrator"), Some(StatusCode::NOT_FOUND));
+        assert_eq!(d.check("/admin/x"), Some(StatusCode::NOT_FOUND));
+        // exact entries don't leak into neighbours
+        assert_eq!(d.check("/.envx"), None);
+        assert_eq!(d.check("/"), None);
+        // a bad status is a build error
+        assert!(
+            PathDeny::build(&cfg::PathDenyConfig {
+                status: 200,
+                paths: vec!["/x".into()],
+                ..Default::default()
+            })
+            .is_err()
+        );
+        assert!(
+            PathDeny::build(&cfg::PathDenyConfig {
+                paths: vec!["/a*b".into()],
+                ..Default::default()
+            })
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn path_deny_inherits_replaces_and_opts_out() {
+        let (f, c) = factory(
+            r#"
+[[site]]
+hosts = ["x"]
+path_deny = { paths = ["/.env"] }
+
+[[site.route]]
+prefix = "/api"
+respond = 200
+
+[[site.route]]
+prefix = "/free"
+respond = 200
+path_deny = false
+
+[[site.route]]
+prefix = "/own"
+respond = 200
+path_deny = { paths = ["/secret"], status = 404 }
+
+[[site]]
+hosts = ["y"]
+path_deny = { paths = ["/other"] }
+respond = 200
+"#,
+        );
+        let site = &c.site[0];
+
+        // r0 inherits the site list (shared Arc with the catch-all)
+        let m = f.build(0, site, &site.route[0]).unwrap();
+        let d = m.path_deny.as_ref().unwrap();
+        assert_eq!(d.check("/.env"), Some(StatusCode::FORBIDDEN));
+        assert!(d.check("/api").is_none());
+        // cfg materializes the inherited block
+        assert!(m.cfg.path_deny.is_some());
+
+        // r1 opted out — the site list does not apply
+        let m = f.build(0, site, &site.route[1]).unwrap();
+        assert!(m.path_deny.is_none());
+        assert!(m.cfg.path_deny.as_ref().is_some_and(|p| !p.enabled));
+
+        // r2 replaced the site list wholesale — `/.env` now passes
+        let m = f.build(0, site, &site.route[2]).unwrap();
+        let d = m.path_deny.as_ref().unwrap();
+        assert!(d.check("/.env").is_none());
+        assert_eq!(d.check("/secret"), Some(StatusCode::NOT_FOUND));
+
+        // the generated catch-all (site.respond) inherits site[1]'s list
+        let catch_all = cfg::RouteConfig::default();
+        let m = f.build(1, &c.site[1], &catch_all).unwrap();
+        assert!(m.path_deny.is_some());
+        assert_eq!(
+            m.path_deny.unwrap().check("/other"),
+            Some(StatusCode::FORBIDDEN)
+        );
     }
 }

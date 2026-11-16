@@ -11,6 +11,7 @@ use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use tokio::sync::watch;
 
 /// Per-connection read-deadline gate shared between the IO wrapper, the
 /// service, and the proxy's upgrade path.
@@ -20,7 +21,7 @@ use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 /// hyper keeps polling the read side mid-write (`mid_message_detect_eof`)
 /// and a client that sends nothing while it downloads would otherwise be
 /// cut when `header_read`/`idle` elapses.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct DeadlineGate {
     /// In-flight request/response cycles — a count, not a flag, since h2
     /// multiplexes streams on one connection. Non-zero = do not arm.
@@ -48,9 +49,41 @@ pub struct DeadlineGate {
     /// protection — `timeouts.send`). `(armed_at, duration)`; cleared on
     /// any write progress. Same watchdog force-close as `armed`.
     pub send_armed: Arc<Mutex<Option<(Instant, Duration)>>>,
+    /// Connection-teardown signal, fired when the connection future
+    /// resolves. Deadline watchdogs hold a dup'd socket fd while they
+    /// sleep; without this they'd keep the kernel socket alive past the
+    /// connection's end — so a server-initiated close (abort, drain)
+    /// only reaches the peer once the sleep expires and the last fd
+    /// finally drops.
+    pub dead: watch::Sender<()>,
+}
+
+impl Default for DeadlineGate {
+    fn default() -> Self {
+        let (dead, _) = watch::channel(());
+        Self {
+            active: Arc::default(),
+            off: Arc::default(),
+            armed: Arc::default(),
+            read_waker: Arc::default(),
+            send_armed: Arc::default(),
+            dead,
+        }
+    }
 }
 
 impl DeadlineGate {
+    /// Signal that the connection future resolved. Armed-deadline
+    /// watchdogs exit and drop their dup'd socket fd so the last real
+    /// fd close tears the socket down immediately — a lingering
+    /// watchdog fd otherwise masks server-initiated closes until its
+    /// sleep ends.
+    pub fn conn_ended(&self) {
+        // `send` only fails with no receivers — nothing armed, nothing
+        // to release; that's fine.
+        let _ = self.dead.send(());
+    }
+
     /// Wake the connection task parked on the read side so `poll_read`
     /// re-enters and re-evaluates the gate/deadline.
     pub fn wake_reader(&self) {
@@ -142,15 +175,26 @@ impl<T> TimeoutIo<T> {
             let dur = self.send;
             *armed = Some((Instant::now(), dur));
             if let Some(tcp) = self.tcp.clone() {
-                let send_armed = self.gate.send_armed.clone();
+                let gate = self.gate.clone();
+                // subscribe before spawning — a receiver created after
+                // `conn_ended` has already fired would mark the signal as
+                // seen and sleep the full deadline anyway
+                let mut dead = gate.dead.subscribe();
                 tokio::spawn(async move {
-                    tokio::time::sleep(dur).await;
-                    let hit = {
-                        let armed = send_armed.lock().unwrap_or_else(|e| e.into_inner());
-                        armed.is_some_and(|(t, d)| t.elapsed() >= d)
-                    };
-                    if hit {
-                        let _ = tcp.shutdown(std::net::Shutdown::Both);
+                    tokio::select! {
+                        () = tokio::time::sleep(dur) => {
+                            let hit = {
+                                let armed =
+                                    gate.send_armed.lock().unwrap_or_else(|e| e.into_inner());
+                                armed.is_some_and(|(t, d)| t.elapsed() >= d)
+                            };
+                            if hit {
+                                let _ = tcp.shutdown(std::net::Shutdown::Both);
+                            }
+                        }
+                        // connection ended: release the dup'd fd so the
+                        // last close actually kills the socket
+                        _ = dead.changed() => {}
                     }
                 });
             }
@@ -224,14 +268,23 @@ impl<T: AsyncRead + Unpin> AsyncRead for TimeoutIo<T> {
                 // epoll error wakes the connection task and ends it
                 if let Some(tcp) = this.tcp.clone() {
                     let gate = this.gate.clone();
+                    // subscribe before spawning — see `arm_send_deadline`
+                    let mut dead = gate.dead.subscribe();
                     tokio::spawn(async move {
-                        tokio::time::sleep(timeout).await;
-                        let hit = {
-                            let armed = gate.armed.lock().unwrap_or_else(|e| e.into_inner());
-                            armed.is_some_and(|(t, d)| t.elapsed() >= d)
-                        };
-                        if hit {
-                            let _ = tcp.shutdown(std::net::Shutdown::Both);
+                        tokio::select! {
+                            () = tokio::time::sleep(timeout) => {
+                                let hit = {
+                                    let armed =
+                                        gate.armed.lock().unwrap_or_else(|e| e.into_inner());
+                                    armed.is_some_and(|(t, d)| t.elapsed() >= d)
+                                };
+                                if hit {
+                                    let _ = tcp.shutdown(std::net::Shutdown::Both);
+                                }
+                            }
+                            // connection ended: release the dup'd fd so
+                            // the last close actually kills the socket
+                            _ = dead.changed() => {}
                         }
                     });
                 }
@@ -584,6 +637,48 @@ mod tests {
         match res {
             Ok(Ok(0)) | Ok(Err(_)) => {}
             other => panic!("watchdog did not close the socket: {other:?}"),
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn conn_ended_releases_watchdog_fd() {
+        let listener = StdListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let client = std::net::TcpStream::connect(addr).unwrap();
+        let (server, _) = listener.accept().unwrap();
+        client.set_nonblocking(true).unwrap();
+        server.set_nonblocking(true).unwrap();
+        let stream = tokio::net::TcpStream::from_std(client).unwrap();
+        let mut server_io = tokio::net::TcpStream::from_std(server).unwrap();
+        let dup = std::os::fd::AsFd::as_fd(&stream)
+            .try_clone_to_owned()
+            .map(std::net::TcpStream::from)
+            .map(Arc::new)
+            .unwrap();
+        let gate = DeadlineGate::default();
+        let mut t = TimeoutIo::new(
+            stream,
+            // long deadline — only `conn_ended` can free the socket early
+            Duration::from_secs(60),
+            Duration::from_secs(60),
+            Duration::from_secs(60),
+            Arc::new(AtomicBool::new(false)),
+            gate.clone(),
+            Some(dup),
+        );
+        // park on a read → arms the deadline and spawns the fd-holding
+        // watchdog task
+        let mut buf = [0u8; 16];
+        let mut read = Box::pin(t.read(&mut buf));
+        let _ = tokio::time::timeout(Duration::from_millis(200), &mut read).await;
+        // conn ends → the watchdog exits and drops its dup; dropping the
+        // io then leaves no fd behind — the peer sees EOF promptly
+        gate.conn_ended();
+        drop(read);
+        drop(t);
+        match tokio::time::timeout(Duration::from_secs(3), server_io.read(&mut [0u8; 1])).await {
+            Ok(Ok(0)) => {}
+            other => panic!("socket outlived conn_ended: {other:?}"),
         }
     }
 }

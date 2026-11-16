@@ -138,6 +138,7 @@ A virtual site: a set of hosts with routes and optional TLS.
 | `ip_deny` | [string] | `[]` | Client CIDRs denied site-wide; unioned with each route's `ip_deny`. |
 | `limits` | LimitOverrides \| null | `null` | Site-wide request-limit overrides, applied between the global `limits` and each route's own `limits`. |
 | `name` | string \| null | `null` | Optional display name used in logs, metrics and the admin API. |
+| `path_deny` | PathDenySchema \| null | `null` | Path denylist for every route in this site, including the `root`/`proxy`/`respond`/`redirect` catch-alls — `false`, a list-file path (`"bad-requests.txt"`), or a table, like `route.path_deny`. A route's own `path_deny` replaces it. |
 | `proxy` | ProxySchema \| null | `null` | Shorthand for a catch-all reverse proxy route: a named upstream (`"app"`), an upstream URL (`"http://app:9000"`), a list of URLs, or a full proxy table like `route.proxy`. |
 | `rate_limit` | RateLimitSchema \| null | `null` | Site-wide rate limit — one shared limiter for every route that inherits it, so `key = "ip"` limits each client across the whole site and `key = "route"` is one bucket site-wide. A route's own `rate_limit` gets a fresh limiter. Same string/table forms as `route.rate_limit`. |
 | `redirect` | RedirectSchema \| null | `null` | Shorthand for a catch-all redirect route — same accepted forms as `route.redirect` (`"https://…"` or a table). Mutually exclusive with `root`/`proxy`/`respond`. |
@@ -181,6 +182,7 @@ One route: a matcher, one handler, and middleware.
 |---|---|---|---|
 | `auth` | AuthConfigSchema \| null | `null` | Authentication configuration; `auth = false` disables it, including any inherited site default. |
 | `cache` | RouteCacheSchema \| null | `null` | Response caching: a store name (`cache = "main"`) or a table. |
+| `close` | boolean | `false` | Connection-close handler: `close = true` drops the connection without responding — Caddy `abort` parity; the request lands in the access log as status 444. Mutually exclusive with the other handlers; for a site-wide close use a `prefix = "/"` route or `path_deny = { paths = ["*"], close = true }`. |
 | `compress` | CompressConfigSchema \| null | `null` | Response compression: `true` for defaults, an algorithm name or list (`compress = "br"`, `compress = ["br", "zstd"]`), or a table. |
 | `cors` | CorsConfigSchema \| null | `null` | CORS handling; `cors = false` disables it, including any inherited site default. |
 | `exact` | string \| null | `null` | Match this exact path only. |
@@ -188,6 +190,7 @@ One route: a matcher, one handler, and middleware.
 | `ip_deny` | [string] | `[]` | Client CIDRs denied; they get 403 before allow rules. |
 | `limits` | LimitOverrides \| null | `null` | Per-route limit overrides. |
 | `match` | MatchSchema \| null | `null` | Additional match conditions: methods, headers, query parameters. `match = "GET"` or `match = ["GET", "POST"]` is shorthand for `{ methods = […] }`. |
+| `path_deny` | PathDenySchema \| null | `null` | Deny requests by path: a list-file (`"bad-requests.txt"`) or a table with `file`/`paths`. Replaces any inherited site `path_deny` whole-block; `path_deny = false` opts out of it. |
 | `prefix` | string \| null | `null` | Match paths starting with this prefix. Prefix matching is segment-aware: `/api` matches `/api` and `/api/…` but not `/apix`. |
 | `priority` | integer | `0` | Priority among routes that tie on specificity. Higher wins. |
 | `proxy` | ProxySchema \| null | `null` | Reverse proxy: an upstream reference (`"name"`/`"url"`/`[urls]`, like `site.proxy`) or a full table. |
@@ -768,6 +771,38 @@ Schema shape for `upstream.*.health.passive` (a count or a table).
 |---|---|
 | `integer` | `5` — mark unhealthy after this many consecutive failures. |
 | `PassiveHealth` table | Full table form. |
+
+## `PathDenyConfig`
+
+Path denylist middleware: requests whose normalized path matches an
+entry are rejected before IP ACLs, auth, rate limiting, caching and
+the handler. Entries come from `file` (one per line — `#` comments
+allowed, a leading `path ` per line tolerated for Caddy-exported
+lists), `paths` (inline), or both. A trailing `*` on an entry makes
+it a literal prefix match (`/admin*` also catches `/administrator`);
+every other entry is an exact match after the same normalization
+request paths get (percent-decoding, dot segments, duplicate
+slashes), so `/%2e%2e/x`, `%2F` and `//` spellings hit the same
+entry.
+
+| field | type | default | description |
+|---|---|---|---|
+| `close` | boolean | `false` | Drop the connection without responding (Caddy `abort` parity). The denial still lands in the access log and metrics as status 444. Overrides `status`. |
+| `enabled` | boolean | `true` | Set `false` to opt a route out of an inherited site `path_deny`. |
+| `file` | string \| null | `null` | A file of deny entries, one per line. Relative to the config file containing the reference; missing or unreadable files fail the load. Watched by `--watch`. |
+| `paths` | [string] | `[]` | Inline deny entries — same syntax as list-file lines. |
+| `status` | integer | `403` | Status for denied requests — an error status, 400–599 (403 default; 404 for stealth). Ignored when `close` is set. |
+
+## `PathDenySchema`
+
+Schema shape for `site.path_deny`/`route.path_deny` — `false`, a
+list-file path, or a table.
+
+| form | description |
+|---|---|
+| `boolean` | `path_deny = false` — no path denylist; opts a route out of an inherited site list. |
+| `string` | `"bad-requests.txt"` — a file of deny entries, one per line. |
+| `PathDenyConfig` table | Full table form. |
 
 ## `PrefixPair`
 

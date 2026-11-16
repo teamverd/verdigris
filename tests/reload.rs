@@ -207,6 +207,54 @@ async fn reload_listener_diff_adds_and_removes() {
 }
 
 #[tokio::test]
+async fn reload_picks_up_path_deny_list_edits() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("verd.toml");
+    let list = dir.path().join("bad-requests.txt");
+    let port = portpicker::pick_unused_port().unwrap();
+    let admin_port = portpicker::pick_unused_port().unwrap();
+    // the config names the list once; editing the file alone must move
+    // the deny set on reload (the file joins the --watch trigger set)
+    write_cfg(
+        &path,
+        port,
+        admin_port,
+        "[[site]]\ndefault = true\ntls = \"off\"\nrespond = \"ok\\n\"\npath_deny = { file = \"bad-requests.txt\" }\n",
+    );
+    std::fs::write(&list, "/.env\n").unwrap();
+    let (base, _admin, _shared, tx, sd) = start(&path).await;
+    // a fresh connection per request — generations resolve per conn, so
+    // a pooled keep-alive would keep serving the pre-reload runtime
+    let status = |p: &str| {
+        let base = base.clone();
+        let p = p.to_string();
+        async move {
+            reqwest::get(format!("{base}{p}"))
+                .await
+                .unwrap()
+                .status()
+                .as_u16()
+        }
+    };
+    assert_eq!(status("/.env").await, 403);
+    assert_eq!(status("/wp-config.php").await, 200);
+
+    // grow the list: the reload re-reads `path_deny.file`
+    std::fs::write(&list, "/.env\n/wp-config.php\n").unwrap();
+    reload_via_channel(&tx)
+        .await
+        .expect("reload picks up edits");
+    assert_eq!(status("/wp-config.php").await, 403);
+
+    // an unreadable/broken list fails the reload; the old list stays live
+    std::fs::write(&list, "/.env\n*bad\n").unwrap();
+    assert!(reload_via_channel(&tx).await.is_err());
+    assert_eq!(status("/wp-config.php").await, 403);
+
+    let _ = sd.send(true);
+}
+
+#[tokio::test]
 async fn reload_invalid_config_keeps_old_generation() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("verd.toml");

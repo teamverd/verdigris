@@ -1,7 +1,8 @@
 # Middleware
 
-Per-route, in order: `ip acl → CORS preflight → auth → rate limit →
-cache → handler → security/cors/ratelimit headers → compression`.
+Per-route, in order: `path deny → ip acl → CORS preflight → auth →
+rate limit → cache → handler → security/cors/ratelimit headers →
+compression`.
 
 ## Site defaults
 
@@ -33,7 +34,8 @@ rate_limit = { rate = "10/s", key = "route" }   # replaces, doesn't merge
 - `enabled = false` opts a route out of an inherited block; the bare
   spelling says the same thing for every middleware block —
   `auth = false`, `cors = false`, `rate_limit = false`, `cache = false`,
-  `compress = false`, `response_headers = false`, `security = false`.
+  `compress = false`, `response_headers = false`, `security = false`,
+  `path_deny = false`.
 - A site-level `rate_limit` builds **one shared limiter** across all
   routes that inherit it — `key = "ip"` limits each client site-wide.
 - IP ACLs **tighten only**: denies union, and a request must pass both
@@ -54,6 +56,49 @@ Client IP honours `X-Forwarded-For` only from `trusted_proxies`. A
 site's `trusted_proxies` **replaces** the global
 `server.trusted_proxies` list — set the full CIDR set on the site, not
 just the additions.
+
+## Path denylist
+
+`path_deny` rejects requests whose normalized path matches a denylist —
+from a list file (`file`), inline entries (`paths`), or both. At site
+level it covers every route, including the `root`/`proxy`/`respond`/
+`redirect` catch-alls:
+
+```toml
+[[site]]
+hosts = ["a.example", "b.example"]
+path_deny = { file = "bad-requests.txt" }   # or: path_deny = "bad-requests.txt"
+
+[[site.route]]
+prefix = "/public"
+respond = "open"
+path_deny = false                           # opt out of the site list
+```
+
+List-file format: one path per line, `#` comments and blank lines
+skipped, and a leading `path ` per line is tolerated so Caddy-exported
+lists (`path /.env`, `path /admin*`) work verbatim. A trailing `*`
+makes an entry a literal prefix — `/admin*` denies `/admin`, `/admin/x`,
+`/administrator`; every other entry is an exact match. Entries are
+normalized like request paths — percent-decoding, dot-segments,
+duplicate slashes — so `/%2e%2e/x`, `%2F`, and `//` spellings hit the
+same entry.
+
+- `status` is the denial response (default `403`; `404` for stealth)
+  and must be an error status.
+- `close = true` drops the connection without responding (Caddy
+  `abort` parity): on HTTP/1 the socket closes mid-request, on HTTP/2
+  the whole connection is torn down — the client never sees an HTTP
+  status. The denial still lands in the access log and metrics as
+  `444`; `status` is ignored. To close *every* request on a route
+  regardless of path, use the `close = true` handler instead.
+- Runs **first** in the middleware order — before IP ACLs, auth, rate
+  limiting, cache, and the handler.
+- A route's own `path_deny` **replaces** the site list (like
+  `rate_limit`); `path_deny = false` opts out entirely.
+- `file` is relative to the config file that names it and joins the
+  `--watch` set — editing the list triggers a reload. `verd config`
+  shows the file reference, not the expanded entries.
 
 ## Response headers
 

@@ -351,6 +351,33 @@ impl<'de> Shorthand<'de> for RateLimitConfig {
     }
 }
 
+/// `path_deny` accepts `false` (opt out of an inherited site list), a
+/// list-file path (`path_deny = "bad-requests.txt"`), or a table. A
+/// bare *list* stays ambiguous — `["a.txt", "b.txt"]` reads as files
+/// but would expand to `paths` — so inline entries spell out
+/// `{ paths = […] }` (which still takes a scalar via `one_or_many`).
+fn opt_path_deny<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<Option<PathDenyConfig>, D::Error> {
+    opt_shorthand(d)
+}
+
+impl<'de> Shorthand<'de> for PathDenyConfig {
+    const EXPECTING: &'static str = "path_deny must be false, a list-file path, or a table";
+    fn from_bool(enabled: bool) -> Option<Self> {
+        Some(PathDenyConfig {
+            enabled,
+            ..Default::default()
+        })
+    }
+    fn from_str(file: &str) -> Option<Self> {
+        Some(PathDenyConfig {
+            file: Some(PathBuf::from(file)),
+            ..Default::default()
+        })
+    }
+}
+
 /// `acme.directory` accepts a directory URL or a short alias —
 /// `"letsencrypt"` (production) and `"letsencrypt-staging"`. Aliases
 /// resolve to the URL at load so the effective config is canonical.
@@ -2093,6 +2120,13 @@ pub struct SiteConfig {
     #[schemars(with = "Vec<String>")]
     #[serde(deserialize_with = "cidr::deserialize")]
     pub ip_deny: Vec<ipnet::IpNet>,
+    /// Path denylist for every route in this site, including the
+    /// `root`/`proxy`/`respond`/`redirect` catch-alls — `false`, a
+    /// list-file path (`"bad-requests.txt"`), or a table, like
+    /// `route.path_deny`. A route's own `path_deny` replaces it.
+    #[serde(deserialize_with = "opt_path_deny")]
+    #[schemars(with = "Option<PathDenySchema>")]
+    pub path_deny: Option<PathDenyConfig>,
     /// Site-wide timeout overrides, applied between the global
     /// `timeouts` and each route's own `timeouts`.
     pub timeouts: Option<TimeoutOverrides>,
@@ -2152,6 +2186,12 @@ pub struct RouteConfig {
     #[serde(deserialize_with = "opt_respond")]
     #[schemars(with = "Option<RespondSchema>")]
     pub respond: Option<RespondHandler>,
+    /// Connection-close handler: `close = true` drops the connection
+    /// without responding — Caddy `abort` parity; the request lands in
+    /// the access log as status 444. Mutually exclusive with the other
+    /// handlers; for a site-wide close use a `prefix = "/"` route or
+    /// `path_deny = { paths = ["*"], close = true }`.
+    pub close: bool,
 
     /// Client CIDRs allowed; others get 403.
     #[schemars(with = "Vec<String>")]
@@ -2161,6 +2201,12 @@ pub struct RouteConfig {
     #[schemars(with = "Vec<String>")]
     #[serde(deserialize_with = "cidr::deserialize")]
     pub ip_deny: Vec<ipnet::IpNet>,
+    /// Deny requests by path: a list-file (`"bad-requests.txt"`) or a
+    /// table with `file`/`paths`. Replaces any inherited site
+    /// `path_deny` whole-block; `path_deny = false` opts out of it.
+    #[serde(deserialize_with = "opt_path_deny")]
+    #[schemars(with = "Option<PathDenySchema>")]
+    pub path_deny: Option<PathDenyConfig>,
     /// Authentication configuration; `auth = false` disables it,
     /// including any inherited site default.
     #[serde(deserialize_with = "opt_auth")]
@@ -2836,6 +2882,84 @@ impl Default for RateLimitConfig {
     }
 }
 
+/// Path denylist middleware: requests whose normalized path matches an
+/// entry are rejected before IP ACLs, auth, rate limiting, caching and
+/// the handler. Entries come from `file` (one per line — `#` comments
+/// allowed, a leading `path ` per line tolerated for Caddy-exported
+/// lists), `paths` (inline), or both. A trailing `*` on an entry makes
+/// it a literal prefix match (`/admin*` also catches `/administrator`);
+/// every other entry is an exact match after the same normalization
+/// request paths get (percent-decoding, dot segments, duplicate
+/// slashes), so `/%2e%2e/x`, `%2F` and `//` spellings hit the same
+/// entry.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct PathDenyConfig {
+    /// Set `false` to opt a route out of an inherited site `path_deny`.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// A file of deny entries, one per line. Relative to the config
+    /// file containing the reference; missing or unreadable files fail
+    /// the load. Watched by `--watch`.
+    pub file: Option<PathBuf>,
+    /// Inline deny entries — same syntax as list-file lines.
+    #[serde(deserialize_with = "one_or_many::deserialize")]
+    pub paths: Vec<String>,
+    /// Status for denied requests — an error status, 400–599 (403
+    /// default; 404 for stealth). Ignored when `close` is set.
+    pub status: u16,
+    /// Drop the connection without responding (Caddy `abort` parity).
+    /// The denial still lands in the access log and metrics as status
+    /// 444. Overrides `status`.
+    pub close: bool,
+    /// Entries loaded from `file` — `config::load` fills this in; not a
+    /// settable field. Configs deserialized without `load` (tests)
+    /// read `file` at middleware build instead.
+    #[serde(skip)]
+    #[schemars(skip)]
+    pub loaded: Option<std::sync::Arc<Vec<crate::router::normalize::DenyEntry>>>,
+}
+
+impl Default for PathDenyConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            file: None,
+            paths: Vec::new(),
+            status: 403,
+            close: false,
+            loaded: None,
+        }
+    }
+}
+
+impl PathDenyConfig {
+    /// Every effective entry — inline `paths` plus the `file` list.
+    /// `config::load` pre-parses `loaded`; a config deserialized
+    /// without it reads `file` here (CWD-relative, since only `load`
+    /// anchors paths onto their document's directory).
+    pub fn entries(&self) -> Result<Vec<crate::router::normalize::DenyEntry>, String> {
+        let mut out = Vec::new();
+        for p in &self.paths {
+            out.push(
+                crate::router::normalize::DenyEntry::parse(p)
+                    .map_err(|e| format!("entry {p:?}: {e}"))?,
+            );
+        }
+        if let Some(loaded) = &self.loaded {
+            out.extend(loaded.iter().cloned());
+        } else if let Some(file) = &self.file {
+            let text = std::fs::read_to_string(file)
+                .map_err(|e| format!("cannot read {}: {e}", file.display()))?;
+            out.extend(
+                crate::router::normalize::parse_deny_list(&text)
+                    .map_err(|e| format!("{}: {e}", file.display()))?,
+            );
+        }
+        Ok(out)
+    }
+}
+
 /// CORS configuration.
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
@@ -3164,6 +3288,20 @@ pub enum RateLimitSchema {
     Full(RateLimitConfig),
 }
 
+/// Schema shape for `site.path_deny`/`route.path_deny` — `false`, a
+/// list-file path, or a table.
+#[derive(JsonSchema)]
+#[schemars(untagged)]
+pub enum PathDenySchema {
+    /// `path_deny = false` — no path denylist; opts a route out of an
+    /// inherited site list.
+    Off(bool),
+    /// `"bad-requests.txt"` — a file of deny entries, one per line.
+    File(String),
+    /// Full table form.
+    Full(Box<PathDenyConfig>),
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3241,5 +3379,50 @@ mod tests {
         // no exact, no class → no page
         assert!(pages.get(301).is_none());
         assert!(pages.get(200).is_none());
+    }
+
+    #[test]
+    fn path_deny_shorthand_forms() {
+        // `false` — the opt-out
+        let s: SiteConfig = toml::from_str("path_deny = false\n").unwrap();
+        let pd = s.path_deny.unwrap();
+        assert!(!pd.enabled);
+        assert!(pd.file.is_none() && pd.paths.is_empty());
+
+        // `"list.txt"` — a bare string names the list file
+        let s: SiteConfig = toml::from_str("path_deny = \"bad-requests.txt\"\n").unwrap();
+        let pd = s.path_deny.unwrap();
+        assert_eq!(
+            pd.file.as_deref(),
+            Some(std::path::Path::new("bad-requests.txt"))
+        );
+        assert_eq!(pd.status, 403);
+
+        // `["a", "b"]` is *rejected* — bare lists read as files, so
+        // inline entries must spell `{ paths = […] }`
+        assert!(toml::from_str::<RouteConfig>("path_deny = [\"/.env\"]\n").is_err());
+
+        // table form — fields combine
+        let r: RouteConfig =
+            toml::from_str("path_deny = { file = \"d.txt\", paths = [\"/x\"], status = 404 }\n")
+                .unwrap();
+        let pd = r.path_deny.unwrap();
+        assert!(pd.file.is_some());
+        assert_eq!(pd.paths, vec!["/x"]);
+        assert_eq!(pd.status, 404);
+
+        // a scalar inside `paths` still lists one entry (one_or_many)
+        let r: RouteConfig = toml::from_str("path_deny = { paths = \"/.env\" }\n").unwrap();
+        assert_eq!(r.path_deny.unwrap().paths, vec!["/.env"]);
+
+        // a wrong shape reports the field's EXPECTING message
+        let err = toml::from_str::<SiteConfig>("path_deny = 5\n").unwrap_err();
+        assert!(err.to_string().contains("path_deny must be"), "{err}");
+        assert!(
+            toml::from_str::<SiteConfig>("path_deny = { bogus = 1 }\n")
+                .unwrap_err()
+                .to_string()
+                .contains("unknown field")
+        );
     }
 }

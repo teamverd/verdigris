@@ -286,6 +286,45 @@ respond = { status = 200, body = "ok" }
 auth = { enabled = false }                    # no auth on this route
 ```
 
+## Deny a path list from a file
+
+Caddy deployments keep a shared `bad-requests.txt` — hundreds of probe
+paths (`/.env`, `/wp-config.php`, traversal tries) imported into every
+site. `path_deny` names that file once per site; every route including
+the catch-all enforces it:
+
+```text
+# /etc/verd/bad-requests.txt — Caddy exports work verbatim
+path /.env
+path /wp-config.php
+path /.git*
+```
+
+```toml
+[[site]]
+hosts = ["a.example", "b.example"]
+tls = "off"
+path_deny = { file = "bad-requests.txt" }   # status = 404 hides the denial
+
+[[site.route]]
+prefix = "/"
+proxy = "http://127.0.0.1:9000"
+
+[[site.route]]
+prefix = "/status"
+respond = { status = 200, body = "ok" }
+path_deny = false                           # this route skips the list
+```
+
+Entries match the normalized request path, so `/%2e%2e/` and `//`
+spellings can't slip past; a trailing `*` is a literal prefix.
+`enabled = false` or `path_deny = false` opts a route out. To answer
+probes with silence instead of a status, `close = true` drops the
+connection (Caddy `abort` parity; logged as `444`). The file anchors
+to the config directory and is re-read on reload/`--watch` — no
+config edit needed to update the list. See
+[Path denylist](middleware.md#path-denylist).
+
 ## Public API: rate limiting and CORS
 
 ```toml

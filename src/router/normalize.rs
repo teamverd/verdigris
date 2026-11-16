@@ -64,6 +64,78 @@ pub fn normalize_path(raw: &str) -> Result<String, NormalizeError> {
     Ok(path)
 }
 
+/// One `path_deny` list entry, normalized exactly like a request path
+/// so `/%2e%2e/`, `%2F` and `//` spellings hit the same entry.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum DenyEntry {
+    /// Exact normalized path match (`/.env`).
+    Exact(String),
+    /// Literal prefix match — a trailing `*` in the entry makes it a
+    /// prefix (`/admin*` also catches `/administrator`, Caddy `path`
+    /// parity). `/admin/*` matches `/admin/` and below, not `/admin`.
+    Prefix(String),
+}
+
+impl DenyEntry {
+    /// Parse one entry: a trailing `*` marks a literal prefix match;
+    /// `*` anywhere else is rejected (no suffix or infix globs). The
+    /// literal part normalizes like a request path — a bare `*` becomes
+    /// `Prefix("/")`, which denies everything. Errors name the *reason*
+    /// — callers add the entry's position (`entry "x":`, `line N:`).
+    pub fn parse(token: &str) -> Result<Self, String> {
+        if token.is_empty() {
+            return Err("empty entry".into());
+        }
+        let (stem, prefix) = match token.strip_suffix('*') {
+            Some(s) => (s, true),
+            None => (token, false),
+        };
+        if stem.contains('*') {
+            return Err("`*` may only appear at the end (prefix match)".into());
+        }
+        let norm = normalize_path(stem).map_err(|e| e.to_string())?;
+        Ok(if prefix {
+            Self::Prefix(norm)
+        } else {
+            Self::Exact(norm)
+        })
+    }
+
+    /// Spelling used in diagnostics — `"/.env"` or `"/admin*"`.
+    pub fn describe(&self) -> String {
+        match self {
+            Self::Exact(p) => format!("{p:?}"),
+            Self::Prefix(p) => format!("{p:?}*"),
+        }
+    }
+}
+
+/// Parse a `path_deny` list file: one entry per line; blank lines and
+/// `#` comments are skipped (a ` #` tail is an inline comment — `#`
+/// can't appear unencoded in a request path, so nothing real is lost);
+/// a leading `path ` per line is tolerated so Caddy-exported lists work
+/// verbatim. Parse failures name the line.
+pub fn parse_deny_list(text: &str) -> Result<Vec<DenyEntry>, String> {
+    let mut out = Vec::new();
+    for (i, raw) in text.lines().enumerate() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let line = line
+            .split_once(" #")
+            .map(|(head, _)| head.trim_end())
+            .unwrap_or(line);
+        let token = line
+            .strip_prefix("path")
+            .filter(|rest| rest.starts_with(char::is_whitespace))
+            .map(str::trim_start)
+            .unwrap_or(line);
+        out.push(DenyEntry::parse(token).map_err(|e| format!("line {}: {token:?}: {e}", i + 1))?);
+    }
+    Ok(out)
+}
+
 /// Shorten a normalized path to its parent prefix: `/a/b/c` → `/a/b`,
 /// `/a` → `/`. Used to enumerate progressively less-specific prefix matches.
 pub fn parent_prefix(path: &str) -> &str {
@@ -135,5 +207,92 @@ mod tests {
         assert_eq!(parent_prefix("/a/b/c"), "/a/b");
         assert_eq!(parent_prefix("/a"), "/");
         assert_eq!(parent_prefix("/"), "/");
+    }
+
+    #[test]
+    fn deny_entry_exact_and_prefix() {
+        assert_eq!(
+            DenyEntry::parse("/.env").unwrap(),
+            DenyEntry::Exact("/.env".into())
+        );
+        assert_eq!(
+            DenyEntry::parse("/admin*").unwrap(),
+            DenyEntry::Prefix("/admin".into())
+        );
+        // a bare `*` normalizes to "deny everything"
+        assert_eq!(
+            DenyEntry::parse("*").unwrap(),
+            DenyEntry::Prefix("/".into())
+        );
+        // entries normalize like request paths — encoded, traversal and
+        // duplicate-slash spellings land on the same entry
+        assert_eq!(
+            DenyEntry::parse("/%2e%2e/etc").unwrap(),
+            DenyEntry::Exact("/etc".into())
+        );
+        assert_eq!(
+            DenyEntry::parse("//a//b").unwrap(),
+            DenyEntry::Exact("/a/b".into())
+        );
+        assert_eq!(
+            DenyEntry::parse("/a%2Fb").unwrap(),
+            DenyEntry::Exact("/a/b".into())
+        );
+        // a bare name gets a leading slash like a request path would
+        assert_eq!(
+            DenyEntry::parse("wp-config.php").unwrap(),
+            DenyEntry::Exact("/wp-config.php".into())
+        );
+    }
+
+    #[test]
+    fn deny_entry_rejects_mid_and_leading_star() {
+        assert!(DenyEntry::parse("*.php").is_err());
+        assert!(DenyEntry::parse("/a*b").is_err());
+        assert!(DenyEntry::parse("*/").is_err());
+        assert!(DenyEntry::parse("").is_err());
+        // normalization failures surface as entry errors
+        assert!(DenyEntry::parse("/a%09b").is_err());
+        assert!(DenyEntry::parse("/%ff").is_err());
+    }
+
+    #[test]
+    fn deny_list_skips_comments_blanks_and_path_token() {
+        let text = "\
+# a comment
+/.env
+
+   \t
+path /admin*
+wp-config.php
+   # indented comment
+";
+        let entries = parse_deny_list(text).unwrap();
+        assert_eq!(
+            entries,
+            vec![
+                DenyEntry::Exact("/.env".into()),
+                DenyEntry::Prefix("/admin".into()),
+                DenyEntry::Exact("/wp-config.php".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn deny_list_errors_name_the_line() {
+        let err = parse_deny_list("/.env\n*.php\n").unwrap_err();
+        assert!(err.contains("line 2"), "{err}");
+        // `pathname` is an entry, not the `path ` keyword
+        let entries = parse_deny_list("pathname\n").unwrap();
+        assert_eq!(entries, vec![DenyEntry::Exact("/pathname".into())]);
+        // a ` #` tail is an inline comment; `/a#b` stays literal
+        let entries = parse_deny_list("/.env # the probe\n/a#b\n").unwrap();
+        assert_eq!(
+            entries,
+            vec![
+                DenyEntry::Exact("/.env".into()),
+                DenyEntry::Exact("/a#b".into()),
+            ]
+        );
     }
 }

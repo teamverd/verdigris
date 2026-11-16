@@ -9,6 +9,7 @@ use std::fmt;
 use regex::Regex;
 
 use crate::config::model::*;
+use crate::router::normalize::DenyEntry;
 
 /// Severity of a [`Diagnostic`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
@@ -397,7 +398,7 @@ fn check_listeners(ctx: &mut Ctx, cfg: &Config) {
 /// Label a site by `name`, else its first host (or `default`), falling
 /// back to the index — `site["api"]` reads better than `site[2]` after
 /// includes have merged fragments from several files.
-fn site_label(i: usize, site: &SiteConfig) -> String {
+pub(crate) fn site_label(i: usize, site: &SiteConfig) -> String {
     if let Some(n) = &site.name {
         format!("site[{n:?}]")
     } else if let Some(h) = site.hosts.first() {
@@ -706,6 +707,9 @@ fn check_site_defaults(ctx: &mut Ctx, cfg: &Config, site_path: &str, site: &Site
     if let Some(sec) = &site.security {
         check_route_security(ctx, &format!("{site_path}.security"), sec);
     }
+    if let Some(pd) = &site.path_deny {
+        check_path_deny(ctx, site_path, pd);
+    }
     check_catchall_nets(
         ctx,
         format!("{site_path}.ip_allow"),
@@ -719,6 +723,83 @@ fn check_site_defaults(ctx: &mut Ctx, cfg: &Config, site_path: &str, site: &Site
         &site.ip_deny,
         "a /0 CIDR denies every client — all requests get 403",
     );
+}
+
+/// `path_deny` checks — entry syntax, status range, dead config. Only
+/// inline `paths` can fail to parse here: `file`-sourced entries arrive
+/// pre-parsed in `loaded` (the loader already read the file); a config
+/// that bypassed `load` re-reads `file` at middleware build instead.
+fn check_path_deny(ctx: &mut Ctx, site_path: &str, pd: &PathDenyConfig) {
+    let path = format!("{site_path}.path_deny");
+    if !pd.enabled {
+        if pd.file.is_some() || !pd.paths.is_empty() || pd.status != 403 || pd.close {
+            ctx.warn(path, "settings are ignored — path_deny.enabled = false");
+        }
+        return;
+    }
+    if pd.close && pd.status != 403 {
+        ctx.warn(
+            format!("{path}.status"),
+            "status is ignored — path_deny.close drops the connection without responding",
+        );
+    }
+    if !(400..=599).contains(&pd.status) {
+        ctx.error(
+            format!("{path}.status"),
+            format!(
+                "status {} must be an error status (400–599) — it answers denied requests",
+                pd.status
+            ),
+        );
+    }
+    let mut entries: Vec<DenyEntry> = Vec::new();
+    for p in &pd.paths {
+        match DenyEntry::parse(p) {
+            Ok(e) => entries.push(e),
+            Err(e) => ctx.error(format!("{path}.paths"), format!("entry {p:?}: {e}")),
+        }
+    }
+    if let Some(loaded) = &pd.loaded {
+        entries.extend(loaded.iter().cloned());
+    }
+    if entries.is_empty() {
+        match &pd.file {
+            None => ctx.warn(path, "path_deny has no entries — nothing is denied"),
+            Some(file) if pd.loaded.is_some() => ctx.warn(
+                format!("{path}.file"),
+                format!(
+                    "{} has no usable entries — nothing is denied",
+                    file.display()
+                ),
+            ),
+            // `file` set but never read — the config bypassed `load`,
+            // so there's nothing to say about its contents
+            Some(_) => {}
+        }
+        return;
+    }
+    let mut seen = HashSet::new();
+    if let Some(dup) = entries.iter().find(|e| !seen.insert((*e).clone())) {
+        ctx.warn(
+            path.clone(),
+            format!(
+                "duplicate entry {} — it only takes effect once",
+                dup.describe()
+            ),
+        );
+    }
+    if entries
+        .iter()
+        .any(|e| matches!(e, DenyEntry::Prefix(p) if p == "/"))
+    {
+        ctx.warn(
+            path,
+            format!(
+                "an entry matching every path denies all requests here with {}",
+                pd.status
+            ),
+        );
+    }
 }
 
 fn check_trusted_proxies(ctx: &mut Ctx, _cfg: &Config, i: usize, site: &SiteConfig) {
@@ -809,6 +890,7 @@ fn check_route(
         ("proxy", route.proxy.is_some()),
         ("redirect", route.redirect.is_some()),
         ("respond", route.respond.is_some()),
+        ("close", route.close),
     ]
     .into_iter()
     .filter_map(|(name, set)| set.then_some(name))
@@ -817,7 +899,7 @@ fn check_route(
         ctx.error(
             path.clone(),
             if handlers.is_empty() {
-                "route must have exactly one handler (static, proxy, redirect, or respond)"
+                "route must have exactly one handler (static, proxy, redirect, respond, or close)"
                     .to_string()
             } else {
                 format!(
@@ -948,6 +1030,9 @@ fn check_route(
     }
     if let Some(sec) = &route.security {
         check_route_security(ctx, &format!("{path}.security"), sec);
+    }
+    if let Some(pd) = &route.path_deny {
+        check_path_deny(ctx, &path, pd);
     }
     check_catchall_nets(
         ctx,
@@ -3237,6 +3322,32 @@ redirect = { scheme = "https" }
             "found redirect + respond"
         ));
 
+        // `close` counts as a handler — alone it's valid, combined it
+        // joins the exclusivity error, `false` is as if absent
+        let cfg = parse_test_config(
+            r#"
+[[site]]
+hosts = ["x"]
+[[site.route]]
+prefix = "/gone"
+close = true
+[[site.route]]
+prefix = "/both"
+close = true
+respond = 200
+[[site.route]]
+prefix = "/off"
+close = false
+"#,
+        );
+        assert!(!has_err(&cfg, "site[\"x\"].route[0]", "handler"));
+        assert!(has_err(
+            &cfg,
+            "site[\"x\"].route[1]",
+            "found respond + close"
+        ));
+        assert!(has_err(&cfg, "site[\"x\"].route[2]", "exactly one handler"));
+
         let cfg = parse_test_config(
             r#"
 [[site]]
@@ -4604,6 +4715,148 @@ root = "/tmp"
             "{:?}",
             validate(&cfg)
         );
+    }
+
+    #[test]
+    fn path_deny_validation() {
+        // a valid inline list is quiet
+        let cfg = parse_test_config(
+            r#"
+[[site]]
+hosts = ["a.example"]
+root = "/tmp"
+path_deny = { paths = ["/.env", "/admin*"] }
+"#,
+        );
+        assert!(errors(&cfg).is_empty(), "{:?}", errors(&cfg));
+
+        // status must be an error status — `status = 200` would serve
+        // denied paths as successes
+        let cfg = parse_test_config(
+            r#"
+[[site]]
+hosts = ["a.example"]
+root = "/tmp"
+path_deny = { paths = ["/.env"], status = 200 }
+"#,
+        );
+        assert!(has_err(&cfg, "site[\"a.example\"].path_deny.status", "400"));
+
+        // enabled + no entries anywhere → a no-op block
+        let cfg = parse_test_config(
+            r#"
+[[site]]
+hosts = ["a.example"]
+root = "/tmp"
+path_deny = true
+"#,
+        );
+        assert!(has_warn(
+            &cfg,
+            "site[\"a.example\"].path_deny",
+            "no entries"
+        ));
+
+        // settings under enabled = false are dead config
+        let cfg = parse_test_config(
+            r#"
+[[site]]
+hosts = ["a.example"]
+root = "/tmp"
+path_deny = { enabled = false, paths = ["/.env"], status = 404 }
+"#,
+        );
+        assert!(has_warn(
+            &cfg,
+            "site[\"a.example\"].path_deny",
+            "enabled = false"
+        ));
+
+        // a mid-string `*` is an entry error, not a silent literal
+        let cfg = parse_test_config(
+            r#"
+[[site]]
+hosts = ["a.example"]
+root = "/tmp"
+path_deny = { paths = ["/a*b"] }
+"#,
+        );
+        assert!(has_err(&cfg, "site[\"a.example\"].path_deny.paths", "`*`"));
+
+        // duplicates warn once
+        let cfg = parse_test_config(
+            r#"
+[[site]]
+hosts = ["a.example"]
+root = "/tmp"
+path_deny = { paths = ["/.env", "/.env"] }
+"#,
+        );
+        assert!(has_warn(&cfg, "site[\"a.example\"].path_deny", "duplicate"));
+
+        // `*` denies every path — almost certainly a glob slip
+        let cfg = parse_test_config(
+            r#"
+[[site]]
+hosts = ["a.example"]
+root = "/tmp"
+path_deny = { paths = ["*"] }
+"#,
+        );
+        assert!(has_warn(
+            &cfg,
+            "site[\"a.example\"].path_deny",
+            "every path"
+        ));
+
+        // `close` is quiet alone, but an explicit `status` under it is
+        // dead config — the conn drops before any status is written
+        let cfg = parse_test_config(
+            r#"
+[[site]]
+hosts = ["a.example"]
+root = "/tmp"
+path_deny = { paths = ["/.env"], close = true }
+"#,
+        );
+        assert!(errors(&cfg).is_empty(), "{:?}", errors(&cfg));
+
+        let cfg = parse_test_config(
+            r#"
+[[site]]
+hosts = ["a.example"]
+root = "/tmp"
+path_deny = { paths = ["/.env"], close = true, status = 404 }
+"#,
+        );
+        assert!(has_warn(
+            &cfg,
+            "site[\"a.example\"].path_deny.status",
+            "ignored"
+        ));
+
+        // route-level checks carry the route path
+        let cfg = parse_test_config(
+            r#"
+[[site]]
+hosts = ["a.example"]
+root = "/tmp"
+[[site.route]]
+prefix = "/"
+respond = 200
+path_deny = { paths = ["bad\tentry*"], status = 99 }
+"#,
+        );
+        assert!(has_err(
+            &cfg,
+            "site[\"a.example\"].route[0].path_deny.status",
+            "400"
+        ));
+        assert!(has_err(
+            &cfg,
+            "site[\"a.example\"].route[0].path_deny.paths",
+            "control"
+        ));
     }
 
     #[test]

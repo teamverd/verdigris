@@ -52,6 +52,10 @@ ergonomic conveniences apply broadly:
   [[site.route]]
   prefix = "/gone"
   respond = 410                             # { status = 410, body = "" }
+
+  [[site.route]]
+  prefix = "/honeypot"
+  close = true                              # drop the connection, no response
   ```
 
   More one-liners in the same spirit: `match = "GET"` (a methods
