@@ -76,7 +76,7 @@ path_deny = false                           # opt out of the site list
 ```
 
 List-file format: one path per line, `#` comments and blank lines
-skipped, and a leading `path ` per line is tolerated so Caddy-exported
+skipped, and a leading `path` per line is tolerated so Caddy-exported
 lists (`path /.env`, `path /admin*`) work verbatim. A trailing `*`
 makes an entry a literal prefix — `/admin*` denies `/admin`, `/admin/x`,
 `/administrator`; every other entry is an exact match. Entries are

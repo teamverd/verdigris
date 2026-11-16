@@ -45,7 +45,7 @@ hosts = ["example.com"]
 path_deny = { file = "bad-requests.txt", close = true }   # Caddy `abort` parity; or status = 404 for stealth
 ```
 
-The file works verbatim: one path per line, `#` comments, `path `
+The file works verbatim: one path per line, `#` comments, `path`-line
 prefixes tolerated, `*` suffix = prefix. `abort` maps to
 `close = true` — the connection drops with no response (logged as
 `444`); without it the denial answers with a configured `status`.

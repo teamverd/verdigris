@@ -231,7 +231,7 @@ fn load_inner(path: &Path, root_text: Option<&str>) -> Result<Loaded, LoadError>
     })
 }
 
-/// Read every `path_deny.file` now — a missing or unparseable list is a
+/// Read every `path_deny.file` now — a missing or unparsable list is a
 /// load error like a missing `include` — storing the parsed entries on
 /// the block (`loaded`) so validation and the middleware build share
 /// one read. Each file joins `report.deny_files` for `--watch` (the

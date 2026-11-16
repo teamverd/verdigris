@@ -17,7 +17,7 @@ workflow publishes the matching section as the GitHub release notes.
   `route` blocks reject requests whose normalized path matches a list
   file (`path_deny = { file = "bad-requests.txt" }`, or the bare
   `path_deny = "bad-requests.txt"` shorthand) and/or inline `paths`.
-  One entry per line with `#` comments, `path ` prefixes, and `*`-
+  One entry per line with `#` comments, `path`-line prefixes, and `*`-
   suffix prefix entries supported, so Caddy-exported lists work
   verbatim; a site block covers every route including catch-alls, and
   `path_deny = false` opts a route out. List files anchor to their
