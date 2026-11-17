@@ -61,6 +61,7 @@ async fn start(
         vec![verd::config::model::ListenAddr {
             addr: format!("127.0.0.1:{port}").parse().unwrap(),
             tls: false,
+            external_port: None,
         }],
         admin_port,
     )
@@ -999,10 +1000,12 @@ async fn start_tls_pair(
             verd::config::model::ListenAddr {
                 addr: format!("127.0.0.1:{plain}").parse().unwrap(),
                 tls: false,
+                external_port: None,
             },
             verd::config::model::ListenAddr {
                 addr: format!("127.0.0.1:{tls}").parse().unwrap(),
                 tls: true,
+                external_port: None,
             },
         ],
         admin,
@@ -1091,6 +1094,68 @@ respond = {{ body = "secure\n" }}
     assert_eq!(
         resp.headers()["location"],
         format!("https://secure.test:{tls}/a/b?x=1&y=2")
+    );
+
+    sd.send(true).unwrap();
+}
+
+/// `external_port` decouples the advertised redirect port from the bound
+/// one — the NAT/`docker -p 443:8443` case where the bound port is
+/// unreachable.
+#[tokio::test]
+async fn tls_external_port_redirect() {
+    let dir = tempfile::tempdir().unwrap();
+    let (cert, key) = write_cert_pair(dir.path(), &["secure.test"]);
+    let config = format!(
+        r#"
+[[site]]
+hosts = ["secure.test"]
+tls = {{ cert = "{cert}", key = "{key}" }}
+
+[[site.route]]
+prefix = "/"
+respond = {{ body = "secure\n" }}
+"#,
+        cert = cert.display(),
+        key = key.display()
+    );
+    let plain = portpicker::pick_unused_port().expect("free port");
+    let tls = portpicker::pick_unused_port().expect("free tls port");
+    let admin = portpicker::pick_unused_port().expect("free admin port");
+    let (_rt, sd) = start_at(
+        &config,
+        vec![
+            verd::config::model::ListenAddr {
+                addr: format!("127.0.0.1:{plain}").parse().unwrap(),
+                tls: false,
+                external_port: None,
+            },
+            verd::config::model::ListenAddr {
+                addr: format!("127.0.0.1:{tls}").parse().unwrap(),
+                tls: true,
+                external_port: Some(443),
+            },
+        ],
+        admin,
+    )
+    .await;
+
+    // the redirect advertises 443 — and 443 is the default, so no port
+    // appears in Location at all
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap();
+    let resp = client
+        .get(format!("http://127.0.0.1:{plain}/a/b?x=1&y=2"))
+        .header("host", "secure.test")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 308);
+    assert_eq!(
+        resp.headers()["location"],
+        "https://secure.test/a/b?x=1&y=2"
     );
 
     sd.send(true).unwrap();

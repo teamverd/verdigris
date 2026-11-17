@@ -19,6 +19,11 @@ docker run --read-only \
   ghcr.io/teamverd/verdigris:latest
 ```
 
+Published ports that differ from the bound port also affect the
+automatic HTTP→HTTPS redirect: it advertises the bound port unless the
+TLS listen entry sets `external_port` — see
+[TLS, ACME & redirects](./tls.md#httphttps-and-security-headers).
+
 ## Compose
 
 `docker-compose.yml` at the repo root runs a demo: static site, an

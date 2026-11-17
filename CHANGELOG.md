@@ -11,6 +11,16 @@ workflow publishes the matching section as the GitHub release notes.
 
 ## [Unreleased]
 
+### Added
+
+- **`server.listen` entries accept `external_port`** — the port
+  advertised in HTTP→HTTPS `Location` redirects can differ from the
+  bound port
+  (`listen = [{ addr = "0.0.0.0:8443", tls = true, external_port = 443 }]`),
+  so TLS behind NAT or container port publishing (`-p 443:8443`)
+  redirects clients to the reachable port instead of the bound one;
+  unset entries keep advertising `addr`'s port
+
 ## [1.4.0] - 2026-11-17
 
 ### Changed

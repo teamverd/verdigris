@@ -263,12 +263,14 @@ respond = {{ body = "acme-ok\n" }}
         config.server.listen.push(cfg::ListenAddr {
             addr: SocketAddr::from(([0, 0, 0, 0], HTTP01_PORT)),
             tls: false,
+            external_port: None,
         });
     }
     if tls {
         config.server.listen.push(cfg::ListenAddr {
             addr: SocketAddr::from(([0, 0, 0, 0], TLSALPN_PORT)),
             tls: true,
+            external_port: None,
         });
     }
     config.admin.listen = vec![SocketAddr::from(([127, 0, 0, 1], 0))];

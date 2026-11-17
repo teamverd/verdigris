@@ -370,6 +370,17 @@ fn check_listeners(ctx: &mut Ctx, cfg: &Config) {
                 ),
             );
         }
+        match l.external_port {
+            Some(0) => ctx.error(
+                format!("server.listen[{i}].external_port"),
+                "external_port must be 1–65535 — 0 is not a routable port",
+            ),
+            Some(_) if !l.tls => ctx.warn(
+                format!("server.listen[{i}].external_port"),
+                "external_port has no effect on a plaintext listener — only TLS listeners are redirect targets",
+            ),
+            _ => {}
+        }
     }
     if cfg.server.max_connections == 0 {
         ctx.error(
@@ -2874,6 +2885,35 @@ max_connections_per_ip = 100
             "server.max_connections_per_ip",
             "per-IP limit exceeds"
         ));
+    }
+
+    #[test]
+    fn listen_external_port_checks() {
+        // 0 is not a routable port
+        let cfg = parse_test_config(
+            "[server]\nlisten = [{ addr = \"127.0.0.1:8443\", tls = true, external_port = 0 }]",
+        );
+        assert!(has_err(&cfg, "server.listen[0].external_port", "1–65535"));
+
+        // set on a plaintext listener: dead config worth a warning
+        let cfg = parse_test_config(
+            "[server]\nlisten = [{ addr = \"127.0.0.1:8080\", external_port = 443 }]",
+        );
+        assert!(has_warn(
+            &cfg,
+            "server.listen[0].external_port",
+            "no effect on a plaintext listener"
+        ));
+
+        // a valid override on a TLS listener is quiet
+        let cfg = parse_test_config(
+            "[server]\nlisten = [{ addr = \"127.0.0.1:8443\", tls = true, external_port = 443 }]",
+        );
+        assert!(
+            validate(&cfg)
+                .iter()
+                .all(|d| !d.path.contains("external_port"))
+        );
     }
 
     #[test]

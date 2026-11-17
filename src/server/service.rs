@@ -456,7 +456,9 @@ fn https_redirect(
         .listen
         .iter()
         .find(|l| l.tls)
-        .map(|l| l.addr.port())?;
+        // `external_port` covers NAT/container port publishing — the
+        // bound port is unreachable when e.g. `-p 443:8443` is in play
+        .map(|l| l.external_port.unwrap_or_else(|| l.addr.port()))?;
     // normalize_host already stripped any port
     let target_host = site.redirect_host.as_deref().unwrap_or(&host_norm);
     let authority = if port == 443 {

@@ -32,7 +32,7 @@ where one field dominates the table — they are a closed set:
 
 | Field | Accepted forms | Expands to |
 | --- | --- | --- |
-| `server.listen` | `"ip:port"`/`":port"` \| `{ addr, tls }` | `ListenAddr` |
+| `server.listen` | `"ip:port"`/`":port"` \| `{ addr, tls, external_port }` | `ListenAddr` |
 | `server.server_header` | `false` \| `"value"` | `String` (`""` = omit; `"off"` deprecated) |
 | `server.security` | `false` \| table | `SecurityConfig{enabled,…}` |
 | `admin` | `false` \| table | `AdminConfig{enabled,…}` |

@@ -25,6 +25,7 @@ async fn start(
     cfg.server.listen = vec![verd::config::model::ListenAddr {
         addr: format!("127.0.0.1:{port}").parse().unwrap(),
         tls: false,
+        external_port: None,
     }];
     cfg.admin.listen = vec![format!("127.0.0.1:{admin_port}").parse().unwrap()];
 

@@ -74,7 +74,17 @@ prefer it over a literal so the config file stays non-sensitive.
 
 `site.redirect_https` (default on) answers plaintext requests with a
 permanent redirect once a certificate exists for the host;
-`site.redirect_host` overrides the target host. Security headers
+`site.redirect_host` overrides the target host. The redirect advertises
+the TLS listener's bound port — when NAT or port publishing makes the
+reachable port different (`-p 443:8443`), set `external_port` on the
+TLS listen entry so the `Location` header stays reachable:
+
+```toml
+[server]
+listen = ["0.0.0.0:8080", { addr = "0.0.0.0:8443", tls = true, external_port = 443 }]
+```
+
+Security headers
 (HSTS, CSP, X-Frame-Options, …) are set globally under
 `[server.security]` — `security = false` inside `[server]` turns the
 baseline off — and refined per route under
