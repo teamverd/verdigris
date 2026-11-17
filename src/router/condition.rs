@@ -55,11 +55,17 @@ impl Conditions {
         let methods = m
             .methods
             .iter()
-            .map(|s| Method::from_bytes(s.as_bytes()).map_err(|_| format!("invalid method {s:?}")))
+            .map(|s| {
+                Method::from_bytes(s.as_bytes()).map_err(|_| {
+                    format!(
+                        "invalid method {s:?} — expected an HTTP method like \"GET\" or \"PURGE\""
+                    )
+                })
+            })
             .collect::<Result<_, _>>()?;
         let headers = compile_named(&m.headers, |name| {
             HeaderName::from_bytes(name.as_bytes())
-                .map_err(|_| format!("invalid header name {name:?}"))
+                .map_err(|_| format!("invalid header name {name:?} — e.g. \"x-custom-header\""))
         })?;
         let query = compile_named(&m.query, |name| Ok(name.clone()))?;
         Ok(Self {
@@ -125,7 +131,9 @@ fn compile_named<K>(
     map.iter()
         .map(|(k, v)| {
             let key = key(k)?;
-            let pat = Pattern::compile(v).map_err(|e| format!("invalid pattern for {k}: {e}"))?;
+            let pat = Pattern::compile(v).map_err(|e| {
+                format!("invalid pattern for {k}: {e} — \"re:\" values must be valid regexes")
+            })?;
             Ok((key, pat))
         })
         .collect()

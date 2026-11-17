@@ -349,7 +349,13 @@ pub async fn serve(
     let mut listeners = Vec::with_capacity(addrs.len());
     for &addr in addrs {
         listeners.push(TcpListener::bind(addr).await.map_err(|e| {
-            std::io::Error::new(e.kind(), format!("cannot bind admin listener {addr}: {e}"))
+            std::io::Error::new(
+                e.kind(),
+                format!(
+                    "cannot bind admin listener {addr}: {e} — {}",
+                    crate::errors::bind_hint(&e)
+                ),
+            )
         })?);
     }
 

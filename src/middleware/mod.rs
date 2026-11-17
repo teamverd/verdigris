@@ -93,10 +93,14 @@ impl HeaderOps {
         let compile_map = |m: &std::collections::BTreeMap<String, String>| -> Result<Vec<(HeaderName, HeaderValue)>, String> {
             m.iter()
                 .map(|(k, v)| {
-                    let name = HeaderName::from_bytes(k.as_bytes())
-                        .map_err(|_| format!("invalid header name {k:?}"))?;
-                    let value = HeaderValue::from_str(v)
-                        .map_err(|_| format!("invalid value for header {k}"))?;
+                    let name = HeaderName::from_bytes(k.as_bytes()).map_err(|_| {
+                        format!("invalid header name {k:?} — e.g. \"x-custom-header\"")
+                    })?;
+                    let value = HeaderValue::from_str(v).map_err(|_| {
+                        format!(
+                            "invalid value for header {k} — values can't contain control characters or non-ASCII"
+                        )
+                    })?;
                     Ok((name, value))
                 })
                 .collect()
@@ -108,8 +112,9 @@ impl HeaderOps {
                 .remove
                 .iter()
                 .map(|k| {
-                    HeaderName::from_bytes(k.as_bytes())
-                        .map_err(|_| format!("invalid header name {k:?}"))
+                    HeaderName::from_bytes(k.as_bytes()).map_err(|_| {
+                        format!("invalid header name {k:?} — e.g. \"x-custom-header\"")
+                    })
                 })
                 .collect::<Result<_, _>>()?,
         })
@@ -489,11 +494,12 @@ impl Factory {
             .transpose()?;
         let cache = effective(&route.cache, &site.cache)
             .map(|rc| -> Result<RouteCacheMw, String> {
-                let store = self
-                    .caches
-                    .get(&rc.store)
-                    .cloned()
-                    .ok_or_else(|| format!("cache store {:?} not found", rc.store))?;
+                let store = self.caches.get(&rc.store).cloned().ok_or_else(|| {
+                    format!(
+                        "cache store {:?} is not defined — declare it as `[cache.{}]`",
+                        rc.store, rc.store
+                    )
+                })?;
                 Ok(RouteCacheMw {
                     store,
                     vary_headers: rc

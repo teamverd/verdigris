@@ -22,10 +22,12 @@ use thiserror::Error;
 #[derive(Debug, Error)]
 pub enum LoadError {
     /// The file could not be read.
-    #[error("cannot read {0}: {1}")]
+    #[error("cannot read {0}: {1} — check the file exists and is readable")]
     Io(PathBuf, String),
     /// The TOML is malformed.
-    #[error("{0}: TOML syntax error: {1}")]
+    #[error(
+        "{0}: TOML syntax error: {1} — check for a missing bracket, quote, or comma near the reported position"
+    )]
     Syntax(PathBuf, String),
     /// Secret interpolation failed.
     #[error("{0}: {1}")]
@@ -45,10 +47,12 @@ pub enum LoadError {
     )]
     InterpolatedPathField(PathBuf, String, String),
     /// An `include` key is present but not a list of path strings.
-    #[error("{0}: `include` must be a list of path strings")]
+    #[error("{0}: `include` must be a list of path strings — e.g. include = [\"conf.d\"]")]
     IncludeType(PathBuf),
     /// An `include` entry is not a file or directory.
-    #[error("{0}: include target {1} does not exist or is not readable")]
+    #[error(
+        "{0}: include target {1} does not exist or is not readable — create it or remove the entry from `include`"
+    )]
     IncludeMissing(PathBuf, PathBuf),
     /// The include chain loops back to a file already being merged.
     #[error("{0}: include cycle — {1} is already on the include chain")]

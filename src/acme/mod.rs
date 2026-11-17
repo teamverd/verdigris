@@ -136,7 +136,10 @@ pub fn build(
         let rate = config.acme.on_demand.rate.or_else(|| {
             // No configured rate would make every allowed SNI a fresh CA
             // order — a self-serve abuse channel. Floor it conservatively.
-            tracing::warn!("acme.on_demand has no `rate`; applying the safety floor of 5/hour");
+            tracing::warn!(
+                "acme.on_demand has no `rate`; applying the safety floor of 5/hour \
+                 — set acme.on_demand.rate to tune it"
+            );
             Some(crate::config::RateSpec {
                 permits: 5,
                 period: Duration::from_secs(3600),
@@ -159,7 +162,11 @@ impl AcmeManager {
     /// when `stop` fires (generation shutdown).
     pub async fn run(self: Arc<Self>, stop: CancellationToken) {
         if let Err(e) = self.account().await {
-            tracing::error!(error = %e, "ACME account init failed; issuance disabled");
+            tracing::error!(
+                error = %e,
+                "ACME account init failed; issuance disabled — check acme.directory \
+                 reachability, acme.email, and acme.eab credentials (a config reload retries)"
+            );
         }
         for hosts in &self.site_hosts {
             self.ensure(hosts).await;
@@ -207,7 +214,12 @@ impl AcmeManager {
             }
             Err(e) => {
                 crate::observe::metrics::acme_issuance(false);
-                tracing::error!(hosts = ?hosts, error = %e, "ACME issuance failed");
+                tracing::error!(
+                    hosts = ?hosts,
+                    error = %e,
+                    retry_in = ?RETRY_BACKOFF,
+                    "ACME issuance failed — will retry after the backoff"
+                );
                 let entry = self.managed.entry(store_key.clone()).or_default();
                 *entry.next_attempt.lock().unwrap_or_else(|e| e.into_inner()) =
                     Some(Instant::now() + RETRY_BACKOFF);
@@ -241,9 +253,11 @@ impl AcmeManager {
     fn builder(&self) -> Result<instant_acme::AccountBuilder, String> {
         match &self.cfg.ca_roots {
             Some(p) => {
-                Account::builder_with_root(p).map_err(|e| format!("acme ca_roots {p:?}: {e}"))
+                Account::builder_with_root(p).map_err(|e| {
+                    format!("cannot build ACME client with acme.ca_roots {p:?}: {e} — expected a PEM CA bundle")
+                })
             }
-            None => Account::builder().map_err(|e| e.to_string()),
+            None => Account::builder().map_err(|e| format!("cannot build ACME client: {e}")),
         }
     }
 
@@ -273,7 +287,7 @@ impl AcmeManager {
                         let key = B64_URL
                             .decode(e.key.trim())
                             .or_else(|_| B64_STD.decode(e.key.trim()))
-                            .map_err(|err| format!("acme.eab.key base64: {err}"))?;
+                            .map_err(|err| format!("acme.eab.key is not valid base64: {err}"))?;
                         Ok::<_, String>(ExternalAccountKey::new(e.key_id.clone(), &key))
                     })
                     .transpose()?;
@@ -281,7 +295,13 @@ impl AcmeManager {
                     .builder()?
                     .create(&new, self.cfg.directory.clone(), eab.as_ref())
                     .await
-                    .map_err(|e| format!("create ACME account: {e}"))?;
+                    .map_err(|e| {
+                        format!(
+                            "cannot create ACME account at {}: {e} — check acme.directory \
+                             reachability, the contact email, and EAB credentials",
+                            self.cfg.directory
+                        )
+                    })?;
                 let raw = serde_json::to_vec(&creds).map_err(|e| e.to_string())?;
                 self.storage.save_account(&raw)?;
                 Ok(account)
@@ -292,12 +312,15 @@ impl AcmeManager {
     /// Issue a certificate covering `hosts` — full order → authorize →
     /// finalize → poll → persist → return installable key.
     async fn issue(self: &Arc<Self>, hosts: &[String]) -> Result<Arc<CertifiedKey>, String> {
-        let account = self.account().await.map_err(|e| format!("account: {e}"))?;
+        let account = self
+            .account()
+            .await
+            .map_err(|e| format!("ACME account unavailable: {e}"))?;
         let ids: Vec<Identifier> = hosts.iter().map(|h| Identifier::Dns(h.clone())).collect();
         let mut order = account
             .new_order(&NewOrder::new(&ids))
             .await
-            .map_err(|e| format!("new order: {e}"))?;
+            .map_err(|e| format!("CA rejected the new order: {e}"))?;
 
         // Provision state the retract pass below must undo — everything
         // lives in one result block so retraction runs on every path,
@@ -312,7 +335,7 @@ impl AcmeManager {
             // provision every authorization's challenge, then mark ready
             let mut auths = order.authorizations();
             while let Some(res) = auths.next().await {
-                let mut authz = res.map_err(|e| format!("authorization: {e}"))?;
+                let mut authz = res.map_err(|e| format!("cannot fetch authorization: {e}"))?;
                 // RFC 8555 lets the CA attach an already-valid
                 // authorization to a new order — nothing to provision
                 // or mark ready.
@@ -321,20 +344,20 @@ impl AcmeManager {
                 }
                 match &self.challenge {
                     ChallengeType::Http01 => {
-                        let mut ch = authz
-                            .challenge(ChallengeType::Http01)
-                            .ok_or("CA offered no http-01 challenge")?;
+                        let mut ch = authz.challenge(ChallengeType::Http01).ok_or(
+                            "CA offered no http-01 challenge — pick a different acme.challenge",
+                        )?;
                         self.http01
                             .insert(&ch.token, ch.key_authorization().as_str().to_string());
                         tokens.push(ch.token.clone());
                         ch.set_ready()
                             .await
-                            .map_err(|e| format!("challenge ready: {e}"))?;
+                            .map_err(|e| format!("cannot mark challenge ready: {e}"))?;
                     }
                     ChallengeType::TlsAlpn01 => {
-                        let mut ch = authz
-                            .challenge(ChallengeType::TlsAlpn01)
-                            .ok_or("CA offered no tls-alpn-01 challenge")?;
+                        let mut ch = authz.challenge(ChallengeType::TlsAlpn01).ok_or(
+                            "CA offered no tls-alpn-01 challenge — pick a different acme.challenge",
+                        )?;
                         // AuthorizedIdentifier renders wildcards as "*.dom"
                         let ident = ch.identifier().to_string();
                         let host = ident.strip_prefix("*.").unwrap_or(&ident);
@@ -344,13 +367,13 @@ impl AcmeManager {
                         alpn_hosts.push(host_key(host));
                         ch.set_ready()
                             .await
-                            .map_err(|e| format!("challenge ready: {e}"))?;
+                            .map_err(|e| format!("cannot mark challenge ready: {e}"))?;
                     }
                     ChallengeType::Dns01 => {
                         let (name, value) = {
-                            let ch = authz
-                                .challenge(ChallengeType::Dns01)
-                                .ok_or("CA offered no dns-01 challenge")?;
+                            let ch = authz.challenge(ChallengeType::Dns01).ok_or(
+                                "CA offered no dns-01 challenge — pick a different acme.challenge",
+                            )?;
                             // AuthorizedIdentifier renders wildcards as
                             // "*.dom"; the record lives at the base name.
                             let ident = ch.identifier().to_string();
@@ -360,15 +383,21 @@ impl AcmeManager {
                                 ch.key_authorization().dns_value(),
                             )
                         };
-                        let solver = self.dns.as_ref().ok_or("dns-01 without provider")?;
+                        let solver = self.dns.as_ref().ok_or(
+                            "dns-01 needs an [acme.dns] provider — none is configured",
+                        )?;
                         let record = solver
                             .present(&name, &value)
                             .await
-                            .map_err(|e| format!("publish {name}: {e}"))?;
+                            .map_err(|e| format!("cannot publish TXT {name}: {e}"))?;
                         dns_records.push(record);
                         dns_want.push((name, value));
                     }
-                    other => return Err(format!("unsupported challenge {other:?}")),
+                    other => {
+                        return Err(format!(
+                            "unsupported challenge {other:?} — supported: http-01, tls-alpn-01, dns-01"
+                        ));
+                    }
                 }
             }
 
@@ -377,38 +406,43 @@ impl AcmeManager {
             // pass (handles can't outlive the authorizations stream
             // they borrow).
             if !dns_want.is_empty() {
-                let solver = self.dns.as_ref().ok_or("dns-01 without provider")?;
+                let solver = self.dns.as_ref().ok_or(
+                    "dns-01 needs an [acme.dns] provider — none is configured",
+                )?;
                 solver.await_propagation(&dns_want).await;
                 let mut auths = order.authorizations();
                 while let Some(res) = auths.next().await {
-                    let mut authz = res.map_err(|e| format!("authorization: {e}"))?;
+                    let mut authz = res.map_err(|e| format!("cannot fetch authorization: {e}"))?;
                     if authz.status == instant_acme::AuthorizationStatus::Valid {
                         continue;
                     }
                     authz
                         .challenge(ChallengeType::Dns01)
-                        .ok_or("CA offered no dns-01 challenge")?
+                        .ok_or("CA offered no dns-01 challenge — pick a different acme.challenge")?
                         .set_ready()
                         .await
-                        .map_err(|e| format!("challenge ready: {e}"))?;
+                        .map_err(|e| format!("cannot mark challenge ready: {e}"))?;
                 }
             }
 
             let status = order
                 .poll_ready(&ISSUE_POLL)
                 .await
-                .map_err(|e| format!("order poll: {e}"))?;
+                .map_err(|e| format!("polling order status failed: {e}"))?;
             if !matches!(status, OrderStatus::Ready) {
-                return Err(format!("order not ready: {status:?}"));
+                return Err(format!(
+                    "order ended at {status:?}, not ready — check the hostnames resolve publicly \
+                     and the challenge port reaches this server (80 for http-01, 443 for tls-alpn-01)"
+                ));
             }
             let key_pem = order
                 .finalize()
                 .await
-                .map_err(|e| format!("finalize: {e}"))?;
+                .map_err(|e| format!("order finalize failed: {e}"))?;
             let chain = order
                 .poll_certificate(&ISSUE_POLL)
                 .await
-                .map_err(|e| format!("certificate poll: {e}"))?;
+                .map_err(|e| format!("polling for the issued certificate failed: {e}"))?;
             Ok((key_pem, chain))
         }
         .await;
@@ -443,13 +477,13 @@ fn key_from_pems(chain_pem: &str, key_pem: &str) -> Result<CertifiedKey, String>
     let certs: Vec<rustls::pki_types::CertificateDer<'static>> =
         rustls::pki_types::CertificateDer::pem_reader_iter(&mut rd)
             .collect::<Result<_, _>>()
-            .map_err(|e| format!("cert PEM: {e}"))?;
+            .map_err(|e| format!("cannot parse issued certificate PEM: {e}"))?;
     if certs.is_empty() {
-        return Err("cert PEM contains no certificates".into());
+        return Err("issued PEM contains no certificates — unexpected CA response".into());
     }
     let mut rd = std::io::BufReader::new(key_pem.as_bytes());
     let key = rustls::pki_types::PrivateKeyDer::from_pem_reader(&mut rd)
-        .map_err(|e| format!("key PEM: {e}"))?;
+        .map_err(|e| format!("cannot parse issued key PEM: {e}"))?;
     crate::tls::manual::build_key(certs, key)
 }
 
@@ -563,7 +597,10 @@ impl OnDemandIssue for OnDemand {
     fn issue(&self, host: &str) -> Option<Arc<CertifiedKey>> {
         let host = host_key(host);
         if !self.allowed(&host) {
-            tracing::warn!(host, "on-demand TLS: host not in allowed_hosts");
+            tracing::warn!(
+                host,
+                "on-demand TLS: host not in acme.on_demand.allowed_hosts — refusing to issue"
+            );
             return None;
         }
         use dashmap::mapref::entry::Entry;
@@ -575,7 +612,11 @@ impl OnDemandIssue for OnDemand {
             // allowed host
             Entry::Vacant(v) => {
                 if !self.rate_ok() {
-                    tracing::warn!(host, "on-demand TLS: rate limit reached");
+                    tracing::warn!(
+                        host,
+                        "on-demand TLS: rate limit reached — refusing to issue; \
+                         raise acme.on_demand.rate if legitimate"
+                    );
                     return None;
                 }
                 let w = Arc::new(IssueWait::default());

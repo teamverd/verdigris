@@ -236,15 +236,21 @@ pub fn parse_duration(s: &str) -> Result<Duration, String> {
             chars.next();
         }
         if !matches!(chars.peek(), Some(c) if c.is_alphabetic()) {
-            return Err(format!("time unit needed in {s:?}"));
+            return Err(format!(
+                "invalid duration {s:?} — every number needs a unit, e.g. \"30s\", \"5m\", \"1h\" (a bare \"0\" means zero)"
+            ));
         }
     }
-    let d = duration_parser().parse(s).map_err(|e| e.to_string())?;
+    let d = duration_parser()
+        .parse(s)
+        .map_err(|e| format!("invalid duration {s:?}: {e}"))?;
     // fundu saturates overflowing input at Duration::MAX — reject it
     // like humantime did, so a typo can't pin a timeout forever
-    let d = Duration::try_from(d).map_err(|_| "invalid duration".to_string())?;
+    let d = Duration::try_from(d).map_err(|_| format!("invalid duration {s:?}"))?;
     if d == Duration::MAX {
-        return Err("duration too large".to_string());
+        return Err(format!(
+            "duration {s:?} is too large to represent — check the unit for a typo"
+        ));
     }
     Ok(d)
 }
@@ -348,12 +354,15 @@ impl ByteSize {
         }
         let split = s
             .find(|c: char| c.is_ascii_alphabetic())
-            .ok_or_else(|| format!("invalid byte size {s:?}"))?;
+            .ok_or_else(|| {
+                format!("invalid byte size {s:?} — expected a byte count or a size like \"512KiB\" or \"10MB\"")
+            })?;
         let (num, unit) = s.split_at(split);
-        let num: f64 = num
-            .trim()
-            .parse()
-            .map_err(|_| format!("invalid byte size {s:?}"))?;
+        let num: f64 = num.trim().parse().map_err(|_| {
+            format!(
+                "invalid byte size {s:?} — the number must be numeric, e.g. \"512KiB\" or \"10MB\""
+            )
+        })?;
         let factor: u64 = match unit.trim().to_ascii_lowercase().as_str() {
             "b" => 1,
             "k" | "kb" => 1000,
@@ -364,7 +373,11 @@ impl ByteSize {
             "mib" => 1024 * 1024,
             "gib" => 1024 * 1024 * 1024,
             "tib" => 1024 * 1024 * 1024 * 1024,
-            _ => return Err(format!("invalid byte size unit in {s:?}")),
+            _ => {
+                return Err(format!(
+                    "invalid byte size {s:?} — unknown unit; use B, KB, MB, GB, TB or KiB, MiB, GiB, TiB (e.g. \"16MiB\")"
+                ));
+            }
         };
         Ok(Self((num * factor as f64) as u64))
     }
@@ -436,19 +449,20 @@ impl RateSpec {
     /// Parse a rate string.
     pub fn parse(s: &str) -> Result<Self, String> {
         let s = s.trim();
-        let (num, unit) = s
-            .split_once('/')
-            .ok_or_else(|| format!("invalid rate {s:?}, expected e.g. \"100/s\""))?;
-        let permits: u64 = num
-            .trim()
-            .parse()
-            .map_err(|_| format!("invalid rate count in {s:?}"))?;
+        let (num, unit) = s.split_once('/').ok_or_else(|| {
+            format!("invalid rate {s:?} — expected a count/period like \"100/s\", \"600/m\", or \"10/30s\"")
+        })?;
+        let permits: u64 = num.trim().parse().map_err(|_| {
+            format!("invalid rate {s:?} — the count must be a positive integer, e.g. \"100/s\"")
+        })?;
         let period = match unit.trim().to_ascii_lowercase().as_str() {
             "s" | "sec" | "second" | "seconds" => Duration::from_secs(1),
             "m" | "min" | "minute" | "minutes" => Duration::from_secs(60),
             "h" | "hr" | "hour" | "hours" => Duration::from_secs(3600),
             "d" | "day" | "days" => Duration::from_secs(86400),
-            other => parse_duration(other).map_err(|_| format!("invalid rate unit in {s:?}"))?,
+            other => parse_duration(other).map_err(|_| {
+                format!("invalid rate {s:?} — the period must be s, m, h, d, or a duration like \"30s\" (e.g. \"10/30s\")")
+            })?,
         };
         Ok(Self { permits, period })
     }

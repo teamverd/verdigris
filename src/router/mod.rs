@@ -374,10 +374,10 @@ fn build_matcher(route: &cfg::RouteConfig) -> Result<PathMatch, String> {
     }
     if let Some(r) = &route.regex {
         return Ok(PathMatch::Regex(
-            Regex::new(r).map_err(|e| format!("invalid regex: {e}"))?,
+            Regex::new(r).map_err(|e| format!("invalid route regex {r:?}: {e}"))?,
         ));
     }
-    Err("no path matcher".into())
+    Err("route has no path matcher — set one of exact, prefix, or regex".into())
 }
 
 /// Errors while compiling a [`HostIndex`].

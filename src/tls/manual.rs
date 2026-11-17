@@ -46,25 +46,45 @@ pub fn check_pair(m: &ManualTls) -> Result<(), String> {
 
 /// Parse a PEM file into a certificate chain; must contain ≥1 certificate.
 pub fn load_certs(path: &Path) -> Result<Vec<CertificateDer<'static>>, String> {
-    let data = std::fs::read(path)
-        .map_err(|e| format!("cannot read certificate {}: {e}", path.display()))?;
+    let data = std::fs::read(path).map_err(|e| {
+        format!(
+            "cannot read certificate {}: {e} — check the path exists and is readable",
+            path.display()
+        )
+    })?;
     let mut rd = std::io::BufReader::new(data.as_slice());
     let certs: Vec<_> = CertificateDer::pem_reader_iter(&mut rd)
         .collect::<Result<_, _>>()
-        .map_err(|e| format!("cannot parse certificate PEM {}: {e}", path.display()))?;
+        .map_err(|e| {
+            format!(
+                "cannot parse certificate PEM {}: {e} — expected \"-----BEGIN CERTIFICATE-----\" blocks",
+                path.display()
+            )
+        })?;
     if certs.is_empty() {
-        return Err(format!("no certificates found in {}", path.display()));
+        return Err(format!(
+            "{} contains no certificates — expected PEM \"-----BEGIN CERTIFICATE-----\" blocks",
+            path.display()
+        ));
     }
     Ok(certs)
 }
 
 /// Parse the first private key in a PEM file (PKCS#8, PKCS#1 or SEC1).
 pub fn load_key(path: &Path) -> Result<PrivateKeyDer<'static>, String> {
-    let data = std::fs::read(path)
-        .map_err(|e| format!("cannot read private key {}: {e}", path.display()))?;
+    let data = std::fs::read(path).map_err(|e| {
+        format!(
+            "cannot read private key {}: {e} — check the path exists and is readable",
+            path.display()
+        )
+    })?;
     let mut rd = std::io::BufReader::new(data.as_slice());
-    PrivateKeyDer::from_pem_reader(&mut rd)
-        .map_err(|e| format!("cannot parse private key PEM {}: {e}", path.display()))
+    PrivateKeyDer::from_pem_reader(&mut rd).map_err(|e| {
+        format!(
+            "cannot parse private key PEM {}: {e} — expected a PKCS#8, PKCS#1 (RSA), or SEC1 (EC) key",
+            path.display()
+        )
+    })
 }
 
 /// Combine chain + key, verifying they match where the provider can tell.
@@ -76,7 +96,11 @@ pub fn build_key(
         .cloned()
         .unwrap_or_else(|| Arc::new(rustls::crypto::aws_lc_rs::default_provider()));
     CertifiedKey::from_der(certs, key, &provider)
-        .map_err(|e| format!("certificate/private key mismatch: {e}"))
+        .map_err(|e| {
+            format!(
+                "certificate does not match the private key: {e} — check tls.cert and tls.key are the right pair"
+            )
+        })
 }
 
 /// A watched cert/key pair and the hostnames it serves.
@@ -107,7 +131,10 @@ pub fn spawn_watcher(
     }) {
         Ok(w) => w,
         Err(e) => {
-            tracing::warn!(error = %e, "cannot watch certificates; hot reload disabled");
+            tracing::warn!(
+                error = %e,
+                "cannot watch certificates — hot reload disabled; reload or restart to apply cert changes"
+            );
             return;
         }
     };
@@ -120,7 +147,12 @@ pub fn spawn_watcher(
                 && watched.insert(dir.to_path_buf())
                 && let Err(err) = watcher.watch(dir, RecursiveMode::NonRecursive)
             {
-                tracing::warn!(path = %dir.display(), error = %err, "cert watch failed");
+                tracing::warn!(
+                    path = %dir.display(),
+                    error = %err,
+                    "cert watch failed — changes to this cert won't hot-reload \
+                     (check inotify limits: fs.inotify.max_user_watches)"
+                );
             }
         }
     }
@@ -190,7 +222,8 @@ pub fn spawn_watcher(
                         tracing::warn!(
                             cert = %entry.cert.display(),
                             error = %e,
-                            "certificate reload failed; keeping previous"
+                            "certificate reload failed — keeping the previous cert; \
+                             fix the PEM and save again"
                         );
                     }
                 }

@@ -11,10 +11,15 @@ use thiserror::Error;
 #[derive(Debug, Error)]
 pub enum FmtError {
     /// The file could not be read.
-    #[error("cannot read {0}: {1}")]
+    #[error("cannot read {0}: {1} — check the file exists and is readable")]
     Io(std::path::PathBuf, String),
+    /// The file could not be written.
+    #[error("cannot write {0}: {1} — check the file is writable")]
+    Write(std::path::PathBuf, String),
     /// The file is not valid TOML.
-    #[error("{0}: TOML syntax error: {1}")]
+    #[error(
+        "{0}: TOML syntax error: {1} — check for a missing bracket, quote, or comma near the reported position"
+    )]
     Syntax(std::path::PathBuf, String),
 }
 
@@ -168,7 +173,8 @@ pub fn format_file(path: &Path) -> Result<bool, FmtError> {
     if formatted == original {
         return Ok(false);
     }
-    std::fs::write(path, formatted).map_err(|e| FmtError::Io(path.to_path_buf(), e.to_string()))?;
+    std::fs::write(path, formatted)
+        .map_err(|e| FmtError::Write(path.to_path_buf(), e.to_string()))?;
     Ok(true)
 }
 

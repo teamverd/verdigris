@@ -307,9 +307,16 @@ pub async fn serve_shared(
         std::collections::HashMap::new();
     let mut tasks = tokio::task::JoinSet::new();
     for l in &rt.config.server.listen {
-        let socket = TcpListener::bind(l.addr)
-            .await
-            .map_err(|e| std::io::Error::new(e.kind(), format!("cannot bind {}: {e}", l.addr)))?;
+        let socket = TcpListener::bind(l.addr).await.map_err(|e| {
+            std::io::Error::new(
+                e.kind(),
+                format!(
+                    "cannot bind {}: {e} — {}",
+                    l.addr,
+                    crate::errors::bind_hint(&e)
+                ),
+            )
+        })?;
         spawn_listener(&mut tasks, &mut bound, socket, l.addr, l.tls, &shared);
     }
 
@@ -441,7 +448,11 @@ async fn do_reload(
         }
         Err(e) => {
             crate::observe::metrics::config_reload(false);
-            tracing::error!(cause, error = %e, "config reload failed; keeping previous generation");
+            tracing::error!(
+                cause,
+                error = %e,
+                "config reload failed — keeping the previous generation; fix the config and retry"
+            );
             Err(e)
         }
     }
@@ -453,13 +464,18 @@ async fn reload_inner(
     bound: &mut std::collections::HashMap<(SocketAddr, bool), tokio::sync::watch::Sender<bool>>,
     tasks: &mut tokio::task::JoinSet<()>,
 ) -> Result<(), String> {
-    let path = config_path.ok_or_else(|| "no configuration file path".to_string())?;
+    let path = config_path.ok_or_else(|| {
+        "cannot reload — no config file path is known (the server was started without one)"
+            .to_string()
+    })?;
     let loaded = crate::config::load(path).map_err(|e| e.to_string())?;
     for d in &loaded.diagnostics {
         tracing::warn!(severity = ?d.severity, path = %d.path, "{}", d.message);
     }
     if !loaded.is_valid() {
-        return Err("configuration is invalid".to_string());
+        return Err(
+            "the reloaded config has errors — see the diagnostics logged above".to_string(),
+        );
     }
     let old = shared.load();
     let watch = loaded.watch_plan();
@@ -508,7 +524,7 @@ async fn reload_inner(
         }
         let socket = TcpListener::bind(addr)
             .await
-            .map_err(|e| format!("cannot bind {addr}: {e}"))?;
+            .map_err(|e| format!("cannot bind {addr}: {e} — {}", crate::errors::bind_hint(&e)))?;
         pending.push((socket, addr, tls));
     }
     // sockets whose addr survives with a flipped tls flag: drop first,
@@ -521,9 +537,12 @@ async fn reload_inner(
         if let Some(tx) = bound.remove(&(addr, !tls)) {
             let _ = tx.send(true);
         }
-        let socket = TcpListener::bind(addr)
-            .await
-            .map_err(|e| format!("cannot rebind {addr}: {e}"))?;
+        let socket = TcpListener::bind(addr).await.map_err(|e| {
+            format!(
+                "cannot rebind {addr}: {e} — {}",
+                crate::errors::bind_hint(&e)
+            )
+        })?;
         flipped.push((socket, addr, tls));
     }
 

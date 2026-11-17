@@ -81,7 +81,9 @@ impl Solver {
     fn cloudflare(c: &cfg::CloudflareDns) -> Result<Self, String> {
         let token = c.api_token.trim();
         if token.is_empty() {
-            return Err("acme.dns.cloudflare.api_token is empty".into());
+            return Err(
+                "acme.dns.cloudflare.api_token is empty — supply a token with Zone.DNS:Edit".into(),
+            );
         }
         Ok(Self {
             provider: Box::new(Cloudflare {
@@ -116,7 +118,10 @@ impl Solver {
     /// hard failure here would mask the issuance result.
     pub async fn retract(&self, record: &Record) {
         if let Err(e) = self.provider.retract(record).await {
-            tracing::warn!(error = %e, "dns-01: failed to delete TXT record");
+            tracing::warn!(
+                error = %e,
+                "dns-01: failed to delete TXT record — remove it manually in the provider console"
+            );
         }
     }
 
@@ -142,7 +147,8 @@ impl Solver {
             if now >= deadline {
                 tracing::warn!(
                     timeout = ?self.timeout,
-                    "dns-01: TXT records not visible in DNS yet; validating anyway"
+                    "dns-01: TXT records not visible in DNS yet; validating anyway — \
+                     if issuance fails, check public DNS or raise propagation_timeout"
                 );
                 return;
             }
@@ -180,7 +186,7 @@ impl Solver {
         match self.resolver {
             None => TokioResolver::builder_tokio()
                 .and_then(|b| b.build())
-                .map_err(|e| format!("system resolver: {e}")),
+                .map_err(|e| format!("cannot build system DNS resolver: {e}")),
             Some(addr) => {
                 let mut udp = ConnectionConfig::new(ProtocolConfig::Udp);
                 udp.port = addr.port();
@@ -190,7 +196,7 @@ impl Solver {
                 let config = ResolverConfig::from_parts(None, vec![], vec![ns]);
                 Resolver::builder_with_config(config, TokioRuntimeProvider::new())
                     .build()
-                    .map_err(|e| format!("resolver {addr}: {e}"))
+                    .map_err(|e| format!("cannot build DNS resolver {addr}: {e}"))
             }
         }
     }
@@ -214,7 +220,9 @@ fn parse_nameserver(raw: &str) -> Result<SocketAddr, String> {
     }
     raw.parse::<IpAddr>()
         .map(|ip| SocketAddr::new(ip, 53))
-        .map_err(|_| format!("{raw:?} is not `ip` or `ip:port`"))
+        .map_err(|_| {
+            format!("{raw:?} is not an ip or ip:port — e.g. \"1.1.1.1\" or \"[::1]:5353\"")
+        })
 }
 
 /// Zone candidates for an `_acme-challenge.<host>` name, longest first,
@@ -295,7 +303,12 @@ impl Cloudflare {
             .map_err(|e| format!("{method} {path}: {e}"))?;
         let rsp = tokio::time::timeout(API_TIMEOUT, self.client.request(req))
             .await
-            .map_err(|_| format!("{method} {path}: timed out"))?
+            .map_err(|_| {
+                format!(
+                    "{method} {path}: timed out after {}s",
+                    API_TIMEOUT.as_secs()
+                )
+            })?
             .map_err(|e| format!("{method} {path}: {e}"))?;
         let status = rsp.status();
         let raw = rsp
@@ -313,9 +326,14 @@ impl Cloudflare {
                 .filter_map(|e| e.message.as_deref())
                 .collect::<Vec<_>>()
                 .join(", ");
-            return Err(format!(
-                "{method} {path}: Cloudflare error ({status}): {details}"
-            ));
+            let mut msg = format!("{method} {path}: Cloudflare error ({status}): {details}");
+            if status == hyper::StatusCode::UNAUTHORIZED || status == hyper::StatusCode::FORBIDDEN {
+                msg.push_str(
+                    " — check acme.dns.cloudflare.api_token has Zone.DNS:Edit \
+                     (and Zone.Zone:Read for zone discovery)",
+                );
+            }
+            return Err(msg);
         }
         Ok(env.result)
     }
@@ -346,7 +364,10 @@ impl Cloudflare {
                 return Ok(id.to_string());
             }
         }
-        Err(format!("no Cloudflare zone contains {fqdn}"))
+        Err(format!(
+            "no Cloudflare zone contains {fqdn} — check the domain's zone exists on this \
+             account, or pin acme.dns.cloudflare.zone_id"
+        ))
     }
 }
 
@@ -367,10 +388,9 @@ impl Provider for Cloudflare {
                     })),
                 )
                 .await?;
-            let id = out
-                .get("id")
-                .and_then(|v| v.as_str())
-                .ok_or("create dns_record: response carries no id")?;
+            let id = out.get("id").and_then(|v| v.as_str()).ok_or(
+                "Cloudflare create dns_record response carries no id — unexpected API response",
+            )?;
             tracing::debug!(zone, name = fqdn, id, "dns-01: TXT record created");
             Ok(Record {
                 zone,

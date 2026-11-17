@@ -19,7 +19,9 @@ use thiserror::Error;
 #[derive(Debug, Error)]
 pub enum InterpolateError {
     /// An environment variable was not set and no default was given.
-    #[error("{at}: environment variable {name:?} is not set")]
+    #[error(
+        "{at}: environment variable {name:?} is not set — export it before starting verd, or give a fallback like \"${{{name}:-default}}\""
+    )]
     MissingEnv {
         /// Where the reference appears.
         at: String,
@@ -27,7 +29,9 @@ pub enum InterpolateError {
         name: String,
     },
     /// A referenced file could not be read.
-    #[error("{at}: cannot read secret file {path:?}: {cause}")]
+    #[error(
+        "{at}: cannot read secret file {path:?}: {cause} — check the path and permissions, or give a fallback like \"${{file:{path}:-default}}\""
+    )]
     UnreadableFile {
         /// Where the reference appears.
         at: String,
@@ -37,7 +41,9 @@ pub enum InterpolateError {
         cause: String,
     },
     /// The interpolation syntax was malformed.
-    #[error("{at}: malformed interpolation {expr:?}")]
+    #[error(
+        "{at}: malformed interpolation {expr:?} — supported forms: \"${{VAR}}\", \"${{VAR:-default}}\", \"${{file:/path}}\"; a literal \"${{\" is written \"$${{\""
+    )]
     Malformed {
         /// Where the reference appears.
         at: String,

@@ -73,7 +73,11 @@ impl Compress {
                 "br" | "brotli" => Algo::Brotli,
                 "zstd" => Algo::Zstd,
                 "gzip" | "gz" => Algo::Gzip,
-                other => return Err(format!("unknown compression algorithm {other:?}")),
+                other => {
+                    return Err(format!(
+                        "unknown compression algorithm {other:?} — supported: br, zstd, gzip"
+                    ));
+                }
             };
             if !algos.contains(&a) {
                 algos.push(a);

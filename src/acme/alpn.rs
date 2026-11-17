@@ -12,7 +12,8 @@ use rustls::sign::CertifiedKey;
 /// acmeIdentifier carries `sha256(key_authorization)` (`digest` as
 /// produced by `instant_acme::KeyAuthorization::digest`).
 pub fn challenge_cert(domain: &str, digest: &[u8]) -> Result<Arc<CertifiedKey>, String> {
-    let keypair = rcgen::KeyPair::generate().map_err(|e| format!("rcgen keypair: {e}"))?;
+    let keypair = rcgen::KeyPair::generate()
+        .map_err(|e| format!("cannot generate tls-alpn-01 challenge keypair: {e}"))?;
     let mut params =
         rcgen::CertificateParams::new(vec![domain.to_string()]).map_err(|e| e.to_string())?;
     params.distinguished_name = rcgen::DistinguishedName::new();
@@ -21,14 +22,14 @@ pub fn challenge_cert(domain: &str, digest: &[u8]) -> Result<Arc<CertifiedKey>, 
         .push(rcgen::CustomExtension::new_acme_identifier(digest));
     let cert = params
         .self_signed(&keypair)
-        .map_err(|e| format!("rcgen sign: {e}"))?;
+        .map_err(|e| format!("cannot self-sign tls-alpn-01 challenge certificate: {e}"))?;
     let certs = vec![CertificateDer::from(cert.der().to_vec())];
     let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(keypair.serialize_der()));
     // `CertifiedKey::from_der` validates the leaf and rejects the
     // mandatory critical acmeIdentifier extension — load the signing
     // key directly instead; the cert is a throwaway for the CA only.
     let signing_key = rustls::crypto::aws_lc_rs::sign::any_supported_type(&key)
-        .map_err(|e| format!("load challenge key: {e}"))?;
+        .map_err(|e| format!("cannot load tls-alpn-01 challenge key: {e}"))?;
     Ok(Arc::new(CertifiedKey::new(certs, signing_key)))
 }
 

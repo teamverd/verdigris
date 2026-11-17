@@ -64,7 +64,7 @@ impl Cors {
             tracing::warn!(
                 "cors: origins=[\"*\"] with credentials=true reflects ANY \
                  origin with credentials — this disables same-origin \
-                 protection for the route"
+                 protection for the route; restrict cors.origins or set credentials = false"
             );
         }
         Ok(Self {

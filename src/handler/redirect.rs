@@ -76,7 +76,12 @@ impl Redirect {
         // the normalizer collapses).
         if let Ok(v) = HeaderValue::from_str(&location) {
             if is_scheme_relative(&location) {
-                tracing::warn!(target = %self.target_name(), "refused scheme-relative redirect target");
+                tracing::warn!(
+                    target = %self.target_name(),
+                    location = %location,
+                    "refused scheme-relative redirect target — the template output began \
+                     with \"//\" (open-redirect guard); check the redirect template"
+                );
             } else {
                 resp.headers_mut().insert(http::header::LOCATION, v);
             }
