@@ -18,8 +18,10 @@ workflow publishes the matching section as the GitHub release notes.
   `Host` header, so host-conditioned routes 404'd every h2 request; an
   explicit client `Host` header still takes precedence, matching host
   routing
-- **ACME storage errors name the failing path** — `acme storage:
-  /var/lib/verd/acme: Permission denied` instead of a bare `Permission
+- **ACME storage errors name the failing path and, on permission
+  denied, the remediation** — `acme storage: /var/lib/verd/acme:
+  Permission denied — acme.storage must be writable by the verd process
+  user (running as uid 65532); …` instead of a bare `Permission
   denied`, so volume-permission misconfigurations are diagnosable from
   logs alone
 
