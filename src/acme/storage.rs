@@ -57,19 +57,20 @@ impl Storage {
 
     /// Persist serialized account credentials (0600).
     pub fn save_account(&self, creds: &[u8]) -> Result<(), String> {
-        fs::create_dir_all(&self.root).map_err(err)?;
+        fs::create_dir_all(&self.root).map_err(|e| err(&self.root, e))?;
         crate::fsperm::private_dir(&self.root);
-        write_atomic(&self.account_path(), creds, true).map_err(err)
+        write_atomic(&self.account_path(), creds, true).map_err(|e| err(&self.account_path(), e))
     }
 
     /// Persist an issued cert+key for `host`.
     pub fn save_cert(&self, host: &str, cert_pem: &str, key_pem: &str) -> Result<(), String> {
         let dir = self.cert_dir(host);
-        fs::create_dir_all(&dir).map_err(err)?;
+        fs::create_dir_all(&dir).map_err(|e| err(&dir, e))?;
         crate::fsperm::private_dir(&self.root);
         crate::fsperm::private_dir(&dir);
-        write_atomic(&dir.join("cert.pem"), cert_pem.as_bytes(), false).map_err(err)?;
-        write_atomic(&dir.join("key.pem"), key_pem.as_bytes(), true).map_err(err)
+        let (cert, key) = (dir.join("cert.pem"), dir.join("key.pem"));
+        write_atomic(&cert, cert_pem.as_bytes(), false).map_err(|e| err(&cert, e))?;
+        write_atomic(&key, key_pem.as_bytes(), true).map_err(|e| err(&key, e))
     }
 
     /// Load a stored cert+key for `host` and parse its leaf `notAfter`.
@@ -136,8 +137,8 @@ fn write_atomic(path: &Path, data: &[u8], secret: bool) -> std::io::Result<()> {
     fs::rename(&tmp, path)
 }
 
-fn err(e: std::io::Error) -> String {
-    format!("acme storage: {e}")
+fn err(path: &Path, e: std::io::Error) -> String {
+    format!("acme storage: {}: {e}", path.display())
 }
 
 #[cfg(test)]

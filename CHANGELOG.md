@@ -11,6 +11,18 @@ workflow publishes the matching section as the GitHub release notes.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`match.headers.host` now sees the h2 `:authority`** — HTTP/2
+  requests carry the authority in `:authority` (the request URI), not a
+  `Host` header, so host-conditioned routes 404'd every h2 request; an
+  explicit client `Host` header still takes precedence, matching host
+  routing
+- **ACME storage errors name the failing path** — `acme storage:
+  /var/lib/verd/acme: Permission denied` instead of a bare `Permission
+  denied`, so volume-permission misconfigurations are diagnosable from
+  logs alone
+
 ## [1.3.0] - 2026-11-16
 
 ### Added
