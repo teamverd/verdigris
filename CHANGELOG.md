@@ -11,6 +11,8 @@ workflow publishes the matching section as the GitHub release notes.
 
 ## [Unreleased]
 
+## [1.5.0] - 2026-11-17
+
 ### Added
 
 - **`server.listen` entries accept `external_port`** — the port
@@ -1095,7 +1097,8 @@ reverse proxy with load balancing and retries, response caching
 (RAM/disk/hybrid), compression, rate limiting, CORS, security headers,
 admin API with atomic reloads, Prometheus metrics.
 
-[Unreleased]: https://github.com/teamverd/verdigris/compare/v1.4.0...HEAD
+[Unreleased]: https://github.com/teamverd/verdigris/compare/v1.5.0...HEAD
+[1.5.0]: https://github.com/teamverd/verdigris/compare/v1.4.0...v1.5.0
 [1.4.0]: https://github.com/teamverd/verdigris/compare/v1.3.0...v1.4.0
 [1.3.0]: https://github.com/teamverd/verdigris/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/teamverd/verdigris/compare/v1.1.0...v1.2.0
