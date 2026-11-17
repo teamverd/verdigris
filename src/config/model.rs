@@ -209,7 +209,7 @@ impl<'de> Shorthand<'de> for UpstreamDns {
     const EXPECTING: &'static str = "dns must be a duration or a table";
     fn from_str(s: &str) -> Option<Self> {
         Some(UpstreamDns {
-            grace: humantime::parse_duration(s).ok()?,
+            grace: crate::config::values::parse_duration(s).ok()?,
         })
     }
 }

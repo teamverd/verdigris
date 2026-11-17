@@ -114,10 +114,13 @@ response the handler produced — apply order is remove → set → add.
 
 ## Durations
 
-Every duration field is a quoted string in humantime form — `"30s"`,
-`"5m"`, `"2h"`, `"180d"` (`ms`, `us`, `ns`, `w`, `M`, `y` work too).
-Bare integers are rejected: write the unit explicitly (`hsts_max_age =
-"180d"`, not `180`).
+Every duration field is a quoted duration string — `"30s"`, `"5m"`,
+`"2h"`, `"180d"`. Units: `ns`, `us`/`µs`, `ms`, `s`, `m`, `h`, `d`,
+`w`, `M` (month, a twelfth of a year), `y` (year, 365.25 days), plus
+word aliases like `minutes`, `hours`, `days`. Compound (`"2h 37m"`)
+and fractional (`"1.5h"`) values work too. Bare integers are
+rejected: write the unit explicitly (`hsts_max_age = "180d"`, not
+`180`).
 
 ## Match conditions
 

@@ -57,19 +57,20 @@ impl Storage {
 
     /// Persist serialized account credentials (0600).
     pub fn save_account(&self, creds: &[u8]) -> Result<(), String> {
-        fs::create_dir_all(&self.root).map_err(err)?;
+        fs::create_dir_all(&self.root).map_err(|e| err(&self.root, e))?;
         crate::fsperm::private_dir(&self.root);
-        write_atomic(&self.account_path(), creds, true).map_err(err)
+        write_atomic(&self.account_path(), creds, true).map_err(|e| err(&self.account_path(), e))
     }
 
     /// Persist an issued cert+key for `host`.
     pub fn save_cert(&self, host: &str, cert_pem: &str, key_pem: &str) -> Result<(), String> {
         let dir = self.cert_dir(host);
-        fs::create_dir_all(&dir).map_err(err)?;
+        fs::create_dir_all(&dir).map_err(|e| err(&dir, e))?;
         crate::fsperm::private_dir(&self.root);
         crate::fsperm::private_dir(&dir);
-        write_atomic(&dir.join("cert.pem"), cert_pem.as_bytes(), false).map_err(err)?;
-        write_atomic(&dir.join("key.pem"), key_pem.as_bytes(), true).map_err(err)
+        let (cert, key) = (dir.join("cert.pem"), dir.join("key.pem"));
+        write_atomic(&cert, cert_pem.as_bytes(), false).map_err(|e| err(&cert, e))?;
+        write_atomic(&key, key_pem.as_bytes(), true).map_err(|e| err(&key, e))
     }
 
     /// Load a stored cert+key for `host` and parse its leaf `notAfter`.
@@ -136,8 +137,33 @@ fn write_atomic(path: &Path, data: &[u8], secret: bool) -> std::io::Result<()> {
     fs::rename(&tmp, path)
 }
 
-fn err(e: std::io::Error) -> String {
-    format!("acme storage: {e}")
+fn err(path: &Path, e: std::io::Error) -> String {
+    let mut s = format!("acme storage: {}: {e}", path.display());
+    if e.kind() == std::io::ErrorKind::PermissionDenied {
+        // the usual cause is a container-mounted volume owned by a
+        // different uid — name the process uid so the chown target is
+        // in the log line itself
+        s.push_str(" — acme.storage must be writable by the verd process user");
+        if let Some(uid) = process_uid() {
+            s.push_str(&format!(" (running as uid {uid})"));
+        }
+        s.push_str("; fix ownership/permissions or point acme.storage at a writable directory");
+    }
+    s
+}
+
+/// Process uid on unix via `/proc/self` ownership (no libc dep);
+/// `None` where procfs is absent or on non-unix platforms.
+#[cfg(unix)]
+fn process_uid() -> Option<u32> {
+    use std::os::unix::fs::MetadataExt;
+    fs::metadata("/proc/self").ok().map(|m| m.uid())
+}
+
+/// Non-unix: no uid concept in the hint.
+#[cfg(not(unix))]
+fn process_uid() -> Option<u32> {
+    None
 }
 
 #[cfg(test)]
@@ -170,6 +196,23 @@ mod tests {
                 .permissions()
                 .mode();
             assert_eq!(mode & 0o777, 0o600);
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn permission_denied_names_path_and_remediation() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let blocked = dir.path().join("blocked");
+        fs::create_dir(&blocked).unwrap();
+        fs::set_permissions(&blocked, fs::Permissions::from_mode(0o500)).unwrap();
+        let s = Storage::new(blocked.clone());
+        // root bypasses the mode check — only assert when the write
+        // actually fails
+        if let Err(e) = s.save_account(b"{}") {
+            assert!(e.contains(&blocked.display().to_string()), "{e}");
+            assert!(e.contains("writable"), "{e}");
         }
     }
 

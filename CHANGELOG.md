@@ -11,6 +11,28 @@ workflow publishes the matching section as the GitHub release notes.
 
 ## [Unreleased]
 
+### Changed
+
+- **Duration strings now parse via `fundu` instead of `humantime`** —
+  `humantime` was flagged unmaintained (RUSTSEC-2026-0542); accepted
+  forms are unchanged (`"30s"`, `"2h 37m"`, `"180d"`, word aliases),
+  but `M` now means a twelfth of a year (30d 10h 30m, was 30.44d) and
+  overflowing values are rejected rather than saturating
+
+### Fixed
+
+- **`match.headers.host` now sees the h2 `:authority`** — HTTP/2
+  requests carry the authority in `:authority` (the request URI), not a
+  `Host` header, so host-conditioned routes 404'd every h2 request; an
+  explicit client `Host` header still takes precedence, matching host
+  routing
+- **ACME storage errors name the failing path and, on permission
+  denied, the remediation** — `acme storage: /var/lib/verd/acme:
+  Permission denied — acme.storage must be writable by the verd process
+  user (running as uid 65532); …` instead of a bare `Permission
+  denied`, so volume-permission misconfigurations are diagnosable from
+  logs alone
+
 ## [1.3.0] - 2026-11-16
 
 ### Added

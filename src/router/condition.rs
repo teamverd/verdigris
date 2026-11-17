@@ -75,15 +75,28 @@ impl Conditions {
             return false;
         }
         for (name, pat) in &self.headers {
+            // h2 carries the authority in :authority → the URI, not a
+            // Host header — a `host` condition must see it or every h2
+            // request misses the route. An explicit Host header still
+            // wins (same precedence as host routing in the service).
+            let value = parts
+                .headers
+                .get(name)
+                .and_then(|v| v.to_str().ok())
+                .or_else(|| {
+                    (*name == http::header::HOST)
+                        .then(|| parts.uri.authority().map(|a| a.as_str()))
+                        .flatten()
+                });
             // an empty exact pattern means "presence only" — same rule
             // as query params (an empty-value match is `re:^$`)
             if matches!(pat, Pattern::Exact(s) if s.is_empty()) {
-                if !parts.headers.contains_key(name) {
+                if value.is_none() {
                     return false;
                 }
                 continue;
             }
-            match parts.headers.get(name).and_then(|v| v.to_str().ok()) {
+            match value {
                 Some(v) if pat.is_match(v) => {}
                 _ => return false,
             }
@@ -200,6 +213,51 @@ mod tests {
         // empty conditions match anything
         let c2 = Conditions::default();
         assert!(c2.matches(&mk("DELETE", "/", None)));
+    }
+
+    #[test]
+    fn host_condition_sees_h2_authority() {
+        // h2 puts the authority in :authority → the request URI; there
+        // is no Host header unless the client sent one explicitly. A
+        // `host` condition must still match.
+        let m = MatchConditions {
+            headers: [("host".into(), "a.test".into())].into_iter().collect(),
+            ..Default::default()
+        };
+        let c = Conditions::build(&m).unwrap();
+        let h2_style = http::Request::builder()
+            .method("GET")
+            .uri("https://a.test/p")
+            .body(crate::body::empty())
+            .unwrap()
+            .into_parts()
+            .0;
+        assert!(c.matches(&h2_style));
+        let other = http::Request::builder()
+            .method("GET")
+            .uri("https://b.test/p")
+            .body(crate::body::empty())
+            .unwrap()
+            .into_parts()
+            .0;
+        assert!(!c.matches(&other));
+        // an explicit Host header wins over :authority — same precedence
+        // as host routing in the service
+        let both = http::Request::builder()
+            .method("GET")
+            .uri("https://b.test/p")
+            .header("host", "a.test")
+            .body(crate::body::empty())
+            .unwrap()
+            .into_parts()
+            .0;
+        assert!(c.matches(&both));
+        // presence-only host condition sees :authority too
+        let m = MatchConditions {
+            headers: [("host".into(), "".into())].into_iter().collect(),
+            ..Default::default()
+        };
+        assert!(Conditions::build(&m).unwrap().matches(&h2_style));
     }
 
     #[test]
