@@ -75,15 +75,23 @@ impl Auth {
                 users.insert(u.clone(), classify_hash(h)?);
             }
             if let Some(file) = &b.htpasswd {
-                let text = std::fs::read_to_string(file)
-                    .map_err(|e| format!("cannot read htpasswd {}: {e}", file.display()))?;
+                let text = std::fs::read_to_string(file).map_err(|e| {
+                    format!(
+                        "cannot read htpasswd {}: {e} — check the path exists and is readable",
+                        file.display()
+                    )
+                })?;
                 for (lineno, line) in text.lines().enumerate() {
                     let line = line.trim();
                     if line.is_empty() {
                         continue;
                     }
                     let (u, h) = line.split_once(':').ok_or_else(|| {
-                        format!("{} line {}: expected user:hash", file.display(), lineno + 1)
+                        format!(
+                            "{} line {}: expected \"user:hash\" — e.g. \"alice:$2y$05$…\"",
+                            file.display(),
+                            lineno + 1
+                        )
                     })?;
                     users.insert(
                         u.to_string(),
@@ -113,8 +121,12 @@ impl Auth {
         if let Some(k) = &c.api_key {
             let header = match k.location {
                 cfg::ApiKeyLocation::Header => Some(
-                    http::HeaderName::from_bytes(k.name.as_bytes())
-                        .map_err(|_| format!("invalid api key header name {:?}", k.name))?,
+                    http::HeaderName::from_bytes(k.name.as_bytes()).map_err(|_| {
+                        format!(
+                            "invalid api key header name {:?} — e.g. \"x-api-key\"",
+                            k.name
+                        )
+                    })?,
                 ),
                 cfg::ApiKeyLocation::Query => None,
             };
@@ -125,7 +137,7 @@ impl Auth {
                 keys: k.keys.iter().map(|s| s.as_bytes().to_vec()).collect(),
             }));
         }
-        Err("auth block has no method".into())
+        Err("auth has no method — set one of basic, bearer, or api_key".into())
     }
 
     /// Name of the query parameter carrying the credential — `Some`
@@ -161,16 +173,23 @@ impl Auth {
 
 fn classify_hash(h: &str) -> Result<Hash, String> {
     if h.starts_with("$argon2") {
-        PasswordHash::new(h)
-            .map_err(|_| "password value is not a valid argon2 hash".to_string())?;
+        PasswordHash::new(h).map_err(|_| {
+            "password value is not a valid argon2 hash — expected \"$argon2id$…\"".to_string()
+        })?;
         return Ok(Hash::Argon2(h.to_string()));
     }
     if h.starts_with("$2a$") || h.starts_with("$2b$") || h.starts_with("$2y$") {
-        h.parse::<bcrypt::HashParts>()
-            .map_err(|_| "password value is not a valid bcrypt hash".to_string())?;
+        h.parse::<bcrypt::HashParts>().map_err(|_| {
+            "password value is not a valid bcrypt hash — generate one with `htpasswd -nbB user pass`"
+                .to_string()
+        })?;
         return Ok(Hash::Bcrypt(h.to_string()));
     }
-    Err("password value is not an argon2 or bcrypt hash".into())
+    Err(
+        "password value is not an argon2 or bcrypt hash — expected \"$argon2id$…\" or \"$2y$…\"; \
+         plaintext passwords are not allowed"
+            .into(),
+    )
 }
 
 impl Basic {

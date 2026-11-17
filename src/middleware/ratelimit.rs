@@ -89,21 +89,24 @@ impl RateLimiter {
             "identity" => KeyKind::Identity,
             "route" => KeyKind::Route,
             other => {
-                let name = other
-                    .strip_prefix("header:")
-                    .ok_or_else(|| format!("invalid rate_limit key {other:?}"))?;
-                KeyKind::Header(
-                    http::HeaderName::from_bytes(name.as_bytes())
-                        .map_err(|_| format!("invalid rate_limit header name {name:?}"))?,
-                )
+                let name = other.strip_prefix("header:").ok_or_else(|| {
+                    format!(
+                        "invalid rate_limit key {other:?} — use ip, identity, route, or header:<Name>"
+                    )
+                })?;
+                KeyKind::Header(http::HeaderName::from_bytes(name.as_bytes()).map_err(|_| {
+                    format!("invalid rate_limit header name {name:?} — e.g. \"header:x-api-key\"")
+                })?)
             }
         };
-        let spec = c
-            .rate
-            .ok_or_else(|| "rate_limit.rate is required when enabled".to_string())?;
+        let spec = c.rate.ok_or_else(|| {
+            "rate_limit.rate is required when enabled — e.g. rate = \"100/s\"".to_string()
+        })?;
         let rate = spec.per_second();
         if !(rate.is_finite() && rate > 0.0) {
-            return Err(format!("rate_limit rate must be positive, got {spec}"));
+            return Err(format!(
+                "rate_limit rate {spec} must be positive — e.g. rate = \"100/s\""
+            ));
         }
         let burst = c.burst.unwrap_or_else(|| {
             // default burst = one second of rate, at least 1

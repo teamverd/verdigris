@@ -228,12 +228,20 @@ impl Cache {
             Store::Ram(ram) => ram.insert(stored),
             Store::Disk(disk) => {
                 if let Err(e) = disk.insert(stored).await {
-                    tracing::warn!(error = %e, "cache: disk insert failed");
+                    tracing::warn!(
+                        error = %e,
+                        "cache: disk insert failed — the entry won't be cached; \
+                         check disk space and permissions"
+                    );
                 }
             }
             Store::Hybrid { ram, disk } => {
                 if let Err(e) = disk.insert(stored.clone()).await {
-                    tracing::warn!(error = %e, "cache: disk insert failed");
+                    tracing::warn!(
+                        error = %e,
+                        "cache: disk insert failed — the entry lives in RAM only; \
+                         check disk space and permissions"
+                    );
                 }
                 ram.insert(stored);
             }

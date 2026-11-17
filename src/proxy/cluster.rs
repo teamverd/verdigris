@@ -54,11 +54,12 @@ impl UpstreamUrl {
     /// Parse `http://`, `https://` or `h2c://` URLs. Paths are rejected —
     /// upstreams are authorities, not resources.
     pub fn parse(raw: &str) -> Result<Self, String> {
-        let uri =
-            http::Uri::from_str(raw).map_err(|e| format!("invalid upstream URL {raw:?}: {e}"))?;
-        let scheme = uri
-            .scheme()
-            .ok_or_else(|| format!("upstream URL {raw:?} has no scheme"))?;
+        let uri = http::Uri::from_str(raw).map_err(|e| {
+            format!("invalid upstream URL {raw:?}: {e} — expected e.g. \"http://127.0.0.1:8080\"")
+        })?;
+        let scheme = uri.scheme().ok_or_else(|| {
+            format!("upstream URL {raw:?} has no scheme — use http://, https://, or h2c:// (e.g. \"http://127.0.0.1:8080\")")
+        })?;
         let (want, tls, default_port) = if *scheme == Scheme::HTTP {
             (WantProto::H1, false, 80)
         } else if *scheme == Scheme::HTTPS {
@@ -67,19 +68,22 @@ impl UpstreamUrl {
             (WantProto::H2, false, 80)
         } else {
             return Err(format!(
-                "upstream URL {raw:?} must have scheme http, https, or h2c"
+                "upstream URL {raw:?} must have scheme http, https, or h2c — e.g. \"http://127.0.0.1:8080\""
             ));
         };
-        let authority = uri
-            .authority()
-            .ok_or_else(|| format!("upstream URL {raw:?} has no host"))?;
+        let authority = uri.authority().ok_or_else(|| {
+            format!("upstream URL {raw:?} has no host — e.g. \"http://127.0.0.1:8080\"")
+        })?;
         if uri.path() != "/" && !uri.path().is_empty() || uri.query().is_some() {
             return Err(format!(
-                "upstream URL {raw:?} must not contain a path or query"
+                "upstream URL {raw:?} must not contain a path or query — strip it to the \
+                 authority (e.g. \"http://10.0.0.1:8080\"); use the route's prefix/rewrite instead"
             ));
         }
         if authority.as_str().contains('@') {
-            return Err(format!("upstream URL {raw:?} must not contain userinfo"));
+            return Err(format!(
+                "upstream URL {raw:?} must not contain userinfo — drop the \"user:pass@\" part"
+            ));
         }
         // `Authority::host()` keeps the RFC 3986 brackets on IPv6
         // literals; store the bare address so `host` parses as `IpAddr`
@@ -743,7 +747,7 @@ impl Cluster {
             .map(|(i, raw)| {
                 if raw.weight == 0 {
                     return Err(format!(
-                        "upstream.{name}.servers[{i}]: weight must be at least 1"
+                        "upstream.{name}.servers[{i}]: weight must be at least 1 — omit it for the default of 1"
                     ));
                 }
                 UpstreamUrl::parse(&raw.url)
@@ -761,7 +765,10 @@ impl Cluster {
             })
             .collect::<Result<Vec<_>, _>>()?;
         if members.is_empty() {
-            return Err(format!("upstream.{name} has no servers"));
+            return Err(format!(
+                "upstream.{name} has no servers — add at least one URL, \
+                 e.g. servers = [\"http://127.0.0.1:8080\"]"
+            ));
         }
         Ok(Self {
             name: name.to_string(),
@@ -861,14 +868,27 @@ fn build_tls_client(tls: &cfg::UpstreamTls) -> Result<Arc<ClientConfig>, String>
         let mut roots =
             rustls::RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
         if let Some(ca) = &tls.ca {
-            let data = std::fs::read(ca)
-                .map_err(|e| format!("cannot read upstream CA {}: {e}", ca.display()))?;
+            let data = std::fs::read(ca).map_err(|e| {
+                format!(
+                    "cannot read upstream CA {}: {e} — check the path exists and is readable",
+                    ca.display()
+                )
+            })?;
             let certs = CertificateDer::pem_reader_iter(data.as_slice())
                 .collect::<Result<Vec<CertificateDer>, _>>()
-                .map_err(|e| format!("cannot parse upstream CA {}: {e}", ca.display()))?;
+                .map_err(|e| {
+                    format!(
+                        "cannot parse upstream CA {}: {e} — expected PEM certificates",
+                        ca.display()
+                    )
+                })?;
             let (_, ignored) = roots.add_parsable_certificates(certs);
             if let 1.. = ignored {
-                tracing::warn!(ca = %ca.display(), ignored, "unparsable CA certificates ignored");
+                tracing::warn!(
+                    ca = %ca.display(),
+                    ignored,
+                    "unparsable CA certificates ignored — check the file holds only PEM certificate blocks"
+                );
             }
         }
         builder.with_root_certificates(roots).with_no_client_auth()

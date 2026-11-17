@@ -11,10 +11,27 @@ workflow publishes the matching section as the GitHub release notes.
 
 ## [Unreleased]
 
+### Added
+
+- **`server.listen` entries accept `external_port`** — the port
+  advertised in HTTP→HTTPS `Location` redirects can differ from the
+  bound port
+  (`listen = [{ addr = "0.0.0.0:8443", tls = true, external_port = 443 }]`),
+  so TLS behind NAT or container port publishing (`-p 443:8443`)
+  redirects clients to the reachable port instead of the bound one;
+  unset entries keep advertising `addr`'s port
+
 ## [1.4.0] - 2026-11-17
 
 ### Changed
 
+- **Error messages are uniformly human-readable and carry fix hints** —
+  terse runtime logs, build errors, and diagnostics across config
+  loading, validation, TLS/ACME, proxy, cache, middleware, routing,
+  and the CLI now state what is wrong in config terms and how to fix
+  it (e.g. `cannot bind 0.0.0.0:80: Address already in use — is
+  another process (or verd instance) already listening on this
+  port?`), instead of bare `io:`/parser errors
 - **Duration strings now parse via `fundu` instead of `humantime`** —
   `humantime` was flagged unmaintained (RUSTSEC-2026-0542); accepted
   forms are unchanged (`"30s"`, `"2h 37m"`, `"180d"`, word aliases),

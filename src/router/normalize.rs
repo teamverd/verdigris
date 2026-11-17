@@ -91,7 +91,10 @@ impl DenyEntry {
             None => (token, false),
         };
         if stem.contains('*') {
-            return Err("`*` may only appear at the end (prefix match)".into());
+            return Err(
+                "`*` may only appear at the end (prefix match) — e.g. \"/admin*\" or \"/admin/*\""
+                    .into(),
+            );
         }
         let norm = normalize_path(stem).map_err(|e| e.to_string())?;
         Ok(if prefix {

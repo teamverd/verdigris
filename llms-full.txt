@@ -1406,7 +1406,17 @@ prefer it over a literal so the config file stays non-sensitive.
 
 `site.redirect_https` (default on) answers plaintext requests with a
 permanent redirect once a certificate exists for the host;
-`site.redirect_host` overrides the target host. Security headers
+`site.redirect_host` overrides the target host. The redirect advertises
+the TLS listener's bound port — when NAT or port publishing makes the
+reachable port different (`-p 443:8443`), set `external_port` on the
+TLS listen entry so the `Location` header stays reachable:
+
+```toml
+[server]
+listen = ["0.0.0.0:8080", { addr = "0.0.0.0:8443", tls = true, external_port = 443 }]
+```
+
+Security headers
 (HSTS, CSP, X-Frame-Options, …) are set globally under
 `[server.security]` — `security = false` inside `[server]` turns the
 baseline off — and refined per route under
@@ -1832,6 +1842,11 @@ docker run --read-only \
   ghcr.io/teamverd/verdigris:latest
 ```
 
+Published ports that differ from the bound port also affect the
+automatic HTTP→HTTPS redirect: it advertises the bound port unless the
+TLS listen entry sets `external_port` — see
+[TLS, ACME & redirects](docs/book/src/tls.md#httphttps-and-security-headers).
+
 ## Compose
 
 `docker-compose.yml` at the repo root runs a demo: static site, an
@@ -2081,7 +2096,7 @@ Root configuration for a verdigris instance.
 | `include` | [string] |  | Additional files or directories of `*.toml` fragments merged into this configuration, relative to the directory containing this file. Fragment files are loaded in sorted order; scalar conflicts between fragments and the main file are errors. A glob pattern matching no files is a no-op; a missing file or directory is an error. |
 | `limits` | Limits | `{"body_bytes": "10MiB", "header_bytes": "16KiB"}` | Default request limits; individual routes may override. |
 | `log` | LogConfig | `{"access": {"enabled": true, "filter": null, "format": "json", "output": "stdout", "sample": 1.0}, "format": "json", "level": "info", "output": "stderr"}` | Server and access logging. |
-| `server` | ServerConfig | `{"graceful_timeout": "30s", "listen": [{"addr": "0.0.0.0:80", "tls": false}], "max_connections": 65536, "max_connections_per_ip": 256, "security": {"content_type_options": true, "cross_domain_policy": "", "csp": null, "enabled": true, "frame_options": "DENY", "hsts": true, "hsts_max_age": "180d", "hsts_subdomains": false, "referrer_policy": "strict-origin-when-cross-origin"}, "server_header": "verd", "trusted_proxies": []}` | Server-wide settings: listeners, connection limits, shutdown. |
+| `server` | ServerConfig | `{"graceful_timeout": "30s", "listen": [{"addr": "0.0.0.0:80", "external_port": null, "tls": false}], "max_connections": 65536, "max_connections_per_ip": 256, "security": {"content_type_options": true, "cross_domain_policy": "", "csp": null, "enabled": true, "frame_options": "DENY", "hsts": true, "hsts_max_age": "180d", "hsts_subdomains": false, "referrer_policy": "strict-origin-when-cross-origin"}, "server_header": "verd", "trusted_proxies": []}` | Server-wide settings: listeners, connection limits, shutdown. |
 | `site` | [SiteConfig] | `[]` | Virtual sites. Requests are routed by the Host header. |
 | `timeouts` | Timeouts | `{"body_read": "1m", "header_read": "20s", "idle": "75s", "request_deadline": "5m", "send": "1m", "tls_handshake": "10s"}` | Default timeouts; individual routes may override. |
 | `upstream` | object | `{}` | Named upstream clusters for reverse proxy routes. Each entry is a `[upstream.<name>]` table or, for the common case, just a server URL (`upstream.app = "http://a"`), a URL list, or a `{ url, weight, backup }` entry — shorthand for `servers`. |
@@ -2093,7 +2108,7 @@ Server-wide settings.
 | field | type | default | description |
 |---|---|---|---|
 | `graceful_timeout` | string | `"30s"` | Time to wait for in-flight requests during shutdown or reload before connections are closed. |
-| `listen` | [ListenAddrSchema] | `[{"addr": "0.0.0.0:80", "tls": false}]` | Addresses to listen on. Defaults to a single plaintext listener on port 80. Entries are either `"ip:port"` strings or `{ addr = "ip:port", tls = true }` tables to terminate TLS. |
+| `listen` | [ListenAddrSchema] | `[{"addr": "0.0.0.0:80", "external_port": null, "tls": false}]` | Addresses to listen on. Defaults to a single plaintext listener on port 80. Entries are either `"ip:port"` strings or `{ addr = "ip:port", tls = true }` tables to terminate TLS; `external_port` on a TLS entry overrides the port advertised in HTTP→HTTPS redirects (e.g. behind NAT or `-p 443:8443`). |
 | `max_connections` | integer | `65536` | Maximum concurrent connections across all listeners. |
 | `max_connections_per_ip` | integer | `256` | Maximum concurrent connections per client IP address. |
 | `security` | SecurityConfigSchema | `{"content_type_options": true, "cross_domain_policy": "", "csp": null, "enabled": true, "frame_options": "DENY", "hsts": true, "hsts_max_age": "180d", "hsts_subdomains": false, "referrer_policy": "strict-origin-when-cross-origin"}` | Baseline security response headers applied to every route; `security = false` emits none of them. |
@@ -2768,12 +2783,13 @@ Per-route limit overrides.
 
 ## `ListenAddrSchema`
 
-Schema shape for a `server.listen` entry (`"ip:port"` or `{addr, tls}`).
+Schema shape for a `server.listen` entry (`"ip:port"` or
+`{ addr, tls, external_port }`).
 
 | form | description |
 |---|---|
 | `string` | `"ip:port"` or `":port"` (all interfaces) — a plaintext listener. |
-| `{ addr, tls }` | `{ addr = "ip:port", tls = true }` — both optional. |
+| `{ addr, external_port, tls }` | `{ addr = "ip:port", tls = true, external_port = 443 }` — all optional. |
 
 ## `LoadBalancing`
 

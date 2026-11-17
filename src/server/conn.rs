@@ -44,7 +44,11 @@ pub async fn accept_loop(
             Err(e) => {
                 // EMFILE/ENFILE: retrying immediately is a hot spin —
                 // back off briefly so the loop can't starve the runtime
-                tracing::warn!(error = %e, "accept failed");
+                tracing::warn!(
+                    error = %e,
+                    "accept failed — file descriptors may be exhausted (check `ulimit -n` \
+                     and server.max_connections); retrying"
+                );
                 tokio::time::sleep(std::time::Duration::from_millis(20)).await;
                 continue;
             }
@@ -54,7 +58,10 @@ pub async fn accept_loop(
         let rt = shared.load();
         let Some(guard) = rt.limits.admit(peer.ip()) else {
             crate::observe::metrics::conn_rejected();
-            tracing::debug!(%peer, "connection rejected: limit exceeded");
+            tracing::debug!(
+                %peer,
+                "connection rejected — over server.max_connections or max_connections_per_ip"
+            );
             drop(stream);
             continue;
         };

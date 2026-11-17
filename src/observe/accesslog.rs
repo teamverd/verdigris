@@ -267,7 +267,12 @@ fn parse_cond(term: &str) -> Result<Cond, String> {
             "upstream" => Field::Upstream,
             "cache" => Field::Cache,
             "identity" => Field::Identity,
-            other => return Err(format!("unknown log filter field {other:?}")),
+            other => {
+                return Err(format!(
+                    "unknown log filter field {other:?} — expected one of: \
+                     path, host, method, status, upstream, cache, identity"
+                ));
+            }
         };
         let mut value = term[pos + op_str.len()..].trim().to_string();
         if value.starts_with('"') && value.ends_with('"') && value.len() >= 2 {
@@ -275,9 +280,9 @@ fn parse_cond(term: &str) -> Result<Cond, String> {
         }
         // `>=`/`<=` are inclusive — adjust to strict compares
         let (op, num) = if op_str == ">=" || op_str == "<=" {
-            let n: u16 = value
-                .parse()
-                .map_err(|_| format!("log filter {op_str} needs a number"))?;
+            let n: u16 = value.parse().map_err(|_| {
+                format!("log filter {op_str} needs a number — e.g. \"status >= 400\"")
+            })?;
             if op_str == ">=" {
                 (Op::Gt, Some(n.saturating_sub(1)))
             } else {
@@ -294,7 +299,10 @@ fn parse_cond(term: &str) -> Result<Cond, String> {
             num,
         });
     }
-    Err(format!("malformed log filter term {term:?}"))
+    Err(format!(
+        "malformed log filter term {term:?} — expected \"<field> <op> <value>\", \
+         e.g. status >= 400 or path != \"/healthz\" (join terms with &&)"
+    ))
 }
 
 /// Emits access log records.
@@ -374,7 +382,12 @@ impl AccessLogger {
                     tracing::info!(%path, "access log reopened");
                 }
             }
-            Err(e) => tracing::warn!(%path, error = %e, "access log reopen failed"),
+            Err(e) => tracing::warn!(
+                %path,
+                error = %e,
+                "access log reopen failed — writes continue to the old handle; \
+                 fix the path and send SIGUSR1 again"
+            ),
         }
     }
 
@@ -445,14 +458,18 @@ pub fn open_append(path: &str) -> Result<std::fs::File, String> {
         .parent()
         .filter(|d| !d.as_os_str().is_empty())
     {
-        std::fs::create_dir_all(dir)
-            .map_err(|e| format!("cannot create log dir {}: {e}", dir.display()))?;
+        std::fs::create_dir_all(dir).map_err(|e| {
+            format!(
+                "cannot create log directory {}: {e} — check permissions",
+                dir.display()
+            )
+        })?;
     }
     std::fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(path)
-        .map_err(|e| format!("cannot open access log {path}: {e}"))
+        .map_err(|e| format!("cannot open log file {path}: {e} — check the directory is writable"))
 }
 
 /// A `BuildMode::Check` look at a log output path: the file is never
@@ -462,7 +479,9 @@ pub fn open_append(path: &str) -> Result<std::fs::File, String> {
 pub fn check_log_path(path: &str) -> Result<(), String> {
     let p = std::path::Path::new(path);
     if p.is_dir() {
-        return Err(format!("log output {path} is a directory"));
+        return Err(format!(
+            "log output {path} is a directory — point it at a file path instead"
+        ));
     }
     let mut dir = p.parent();
     while let Some(d) = dir {
@@ -471,7 +490,8 @@ pub fn check_log_path(path: &str) -> Result<(), String> {
         }
         if d.exists() {
             return Err(format!(
-                "log output {path}: {} is not a directory",
+                "log output {path}: {} exists but is not a directory — \
+                 the log's parent path must be directories",
                 d.display()
             ));
         }

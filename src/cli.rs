@@ -232,8 +232,9 @@ fn init_tracing(
     cli_level: Option<&str>,
 ) -> Result<Option<ServerLogFile>, String> {
     let level = cli_level.unwrap_or(log.level.as_str());
-    let filter = tracing_subscriber::EnvFilter::try_new(level)
-        .map_err(|e| format!("invalid log level {level:?}: {e}"))?;
+    let filter = tracing_subscriber::EnvFilter::try_new(level).map_err(|e| {
+        format!("invalid log level {level:?}: {e} — use error, warn, info, debug, trace, or a filter like \"verd=debug\"")
+    })?;
     let (writer, file) = match log.output.as_str() {
         "stdout" => (LogWriter::Stdout, None),
         "stderr" => (LogWriter::Stderr, None),
@@ -356,7 +357,9 @@ fn cmd_run(config: Option<PathBuf>, watch: bool, log_level: Option<&str>) -> Exi
     {
         Ok(r) => r,
         Err(e) => {
-            eprintln!("error: cannot start async runtime: {e}");
+            eprintln!(
+                "error: cannot start async runtime: {e} — OS resource limits may be too low (check `ulimit -n` and free memory)"
+            );
             return ExitCode::FAILURE;
         }
     };
@@ -433,14 +436,22 @@ async fn run_async(
             }) {
                 Ok(w) => w,
                 Err(e) => {
-                    tracing::error!(error = %e, "config watch unavailable");
+                    tracing::error!(
+                        error = %e,
+                        "config watch unavailable — --watch is off; send SIGHUP or restart to reload"
+                    );
                     return;
                 }
             };
             let mut plan = watch_rx.borrow_and_update().clone();
             for d in &plan.dirs {
                 if let Err(e) = watcher.watch(d, notify::RecursiveMode::NonRecursive) {
-                    tracing::error!(dir = %d.display(), error = %e, "cannot watch config dir");
+                    tracing::error!(
+                        dir = %d.display(),
+                        error = %e,
+                        "cannot watch config dir — changes there won't trigger a reload \
+                         (check inotify limits: fs.inotify.max_user_watches)"
+                    );
                 }
             }
             tracing::info!(
@@ -457,7 +468,12 @@ async fn run_async(
                         }
                         for d in new.dirs.difference(&plan.dirs) {
                             if let Err(e) = watcher.watch(d, notify::RecursiveMode::NonRecursive) {
-                                tracing::error!(dir = %d.display(), error = %e, "cannot watch config dir");
+                                tracing::error!(
+                                    dir = %d.display(),
+                                    error = %e,
+                                    "cannot watch config dir — changes there won't trigger a reload \
+                                     (check inotify limits: fs.inotify.max_user_watches)"
+                                );
                             }
                         }
                         plan = new;
@@ -508,7 +524,9 @@ async fn run_async(
     while let Some(res) = tasks.join_next().await {
         match res {
             Err(e) => {
-                eprintln!("error: server task panicked: {e}");
+                eprintln!(
+                    "error: server task panicked: {e} — this is a bug; please report it at https://github.com/teamverd/verdigris/issues"
+                );
                 exit = ExitCode::FAILURE;
             }
             Ok(Err(e)) => {
@@ -586,7 +604,9 @@ fn cmd_validate(
     // it in init_tracing — so check level and output read-only here
     let level = log_level.unwrap_or(loaded.config.log.level.as_str());
     if let Err(e) = tracing_subscriber::EnvFilter::try_new(level) {
-        return fatal(format!("invalid log level {level:?}: {e}"));
+        return fatal(format!(
+            "invalid log level {level:?}: {e} — use error, warn, info, debug, trace, or a filter like \"verd=debug\""
+        ));
     }
     match loaded.config.log.output.as_str() {
         "stdout" | "stderr" => {}
@@ -625,7 +645,7 @@ fn cmd_validate(
             }
         } else {
             eprintln!(
-                "error: {}: warnings treated as errors (--strict)",
+                "error: {}: warnings treated as errors (--strict) — fix the warnings above or rerun without --strict",
                 path.display()
             );
         }
@@ -740,7 +760,10 @@ fn cmd_init(output: PathBuf, force: bool) -> ExitCode {
             ExitCode::SUCCESS
         }
         Err(e) => {
-            eprintln!("error: cannot write {}: {e}", output.display());
+            eprintln!(
+                "error: cannot write {}: {e} — check the parent directory exists and is writable",
+                output.display()
+            );
             ExitCode::FAILURE
         }
     }
@@ -967,7 +990,10 @@ fn cmd_schema(output: Option<PathBuf>) -> ExitCode {
                 ExitCode::SUCCESS
             }
             Err(e) => {
-                eprintln!("error: cannot write {}: {e}", path.display());
+                eprintln!(
+                    "error: cannot write {}: {e} — check the parent directory exists and is writable",
+                    path.display()
+                );
                 ExitCode::FAILURE
             }
         },

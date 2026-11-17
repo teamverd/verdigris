@@ -22,10 +22,12 @@ use thiserror::Error;
 #[derive(Debug, Error)]
 pub enum LoadError {
     /// The file could not be read.
-    #[error("cannot read {0}: {1}")]
+    #[error("cannot read {0}: {1} — check the file exists and is readable")]
     Io(PathBuf, String),
     /// The TOML is malformed.
-    #[error("{0}: TOML syntax error: {1}")]
+    #[error(
+        "{0}: TOML syntax error: {1} — check for a missing bracket, quote, or comma near the reported position"
+    )]
     Syntax(PathBuf, String),
     /// Secret interpolation failed.
     #[error("{0}: {1}")]
@@ -45,10 +47,12 @@ pub enum LoadError {
     )]
     InterpolatedPathField(PathBuf, String, String),
     /// An `include` key is present but not a list of path strings.
-    #[error("{0}: `include` must be a list of path strings")]
+    #[error("{0}: `include` must be a list of path strings — e.g. include = [\"conf.d\"]")]
     IncludeType(PathBuf),
     /// An `include` entry is not a file or directory.
-    #[error("{0}: include target {1} does not exist or is not readable")]
+    #[error(
+        "{0}: include target {1} does not exist or is not readable — create it or remove the entry from `include`"
+    )]
     IncludeMissing(PathBuf, PathBuf),
     /// The include chain loops back to a file already being merged.
     #[error("{0}: include cycle — {1} is already on the include chain")]
@@ -4067,7 +4071,7 @@ upstream.list = ["http://a2:9000", {{ url = "http://b2:9000", weight = 2, backup
 upstream.entry = {{ url = "http://c3:9000", weight = 4, backup = true }}
 
 [server]
-listen = [{{ addr = "127.0.0.1:18080", tls = true }}]
+listen = [{{ addr = "127.0.0.1:18080", tls = true, external_port = 443 }}]
 graceful_timeout = "25s"
 trusted_proxies = ["10.0.0.0/8"]
 server_header = "edge"

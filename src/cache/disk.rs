@@ -77,11 +77,17 @@ impl Disk {
     /// called once per generation from `Runtime::build`.
     pub fn open_sync(cfg: &CacheStore) -> Result<Self, String> {
         let Some(dir) = cfg.disk_path.clone() else {
-            return Err("disk tier requires disk_path".into());
+            return Err(
+                "a disk-backed cache tier requires disk_path — set it on the cache store".into(),
+            );
         };
         let objects = dir.join("objects");
-        std::fs::create_dir_all(&objects)
-            .map_err(|e| format!("cache dir {}: {e}", dir.display()))?;
+        std::fs::create_dir_all(&objects).map_err(|e| {
+            format!(
+                "cannot create cache dir {}: {e} — check permissions",
+                dir.display()
+            )
+        })?;
         // cached bodies may carry response data not meant for other
         // local users — keep the store owner-only
         crate::fsperm::private_dir(&dir);
@@ -106,7 +112,9 @@ impl Disk {
     /// directory) are errors.
     pub fn check_path(cfg: &CacheStore) -> Result<(), String> {
         let Some(dir) = cfg.disk_path.clone() else {
-            return Err("disk tier requires disk_path".into());
+            return Err(
+                "a disk-backed cache tier requires disk_path — set it on the cache store".into(),
+            );
         };
         // First existing ancestor must be a directory — `create_dir_all`
         // fails on a file in the way.
@@ -116,7 +124,10 @@ impl Disk {
                 break;
             }
             if p.exists() {
-                return Err(format!("cache dir {}: not a directory", p.display()));
+                return Err(format!(
+                    "cache dir {} exists but is not a directory — remove it or pick another disk_path",
+                    p.display()
+                ));
             }
             match p.parent() {
                 Some(up) => p = up,
@@ -126,7 +137,7 @@ impl Disk {
         let objects = dir.join("objects");
         if objects.exists() && !objects.is_dir() {
             return Err(format!(
-                "cache dir {}: objects is not a directory",
+                "cache dir {}: \"objects\" exists but is not a directory — remove it or pick another disk_path",
                 dir.display()
             ));
         }
@@ -139,7 +150,12 @@ impl Disk {
         let rd = match std::fs::read_dir(&objects) {
             Ok(rd) => rd,
             Err(e) => {
-                tracing::warn!(?objects, error = %e, "cache: cannot scan objects dir");
+                tracing::warn!(
+                    ?objects,
+                    error = %e,
+                    "cache: cannot scan objects dir — existing entries won't be served; \
+                     check permissions"
+                );
                 return;
             }
         };
@@ -169,7 +185,11 @@ impl Disk {
                     kept += 1;
                 }
                 Err(e) => {
-                    tracing::warn!(?path, error = %e, "cache: dropping corrupt object");
+                    tracing::warn!(
+                        ?path,
+                        error = %e,
+                        "cache: dropping corrupt object — likely a torn write from an unclean stop"
+                    );
                     let _ = std::fs::remove_file(&path);
                     dropped += 1;
                 }

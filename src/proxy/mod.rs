@@ -53,11 +53,11 @@ impl Clusters {
     /// anonymous cluster (`@key`) for inline URL lists on first use.
     pub fn resolve(&mut self, r: &cfg::UpstreamRef, key: &str) -> Result<Arc<Cluster>, String> {
         match r {
-            cfg::UpstreamRef::Name(n) => self
-                .by_name
-                .get(n)
-                .cloned()
-                .ok_or_else(|| format!("unknown upstream {n:?}")),
+            cfg::UpstreamRef::Name(n) => self.by_name.get(n).cloned().ok_or_else(|| {
+                format!(
+                    "unknown upstream {n:?} — define it as `[upstream.{n}]` or list server URLs inline"
+                )
+            }),
             cfg::UpstreamRef::Urls(urls) => match self.by_name.entry(format!("@{key}")) {
                 Entry::Occupied(e) => Ok(e.get().clone()),
                 Entry::Vacant(e) => {
@@ -140,7 +140,7 @@ impl Proxy {
                     .map(|rr| {
                         regex::Regex::new(&rr.pattern)
                             .map(|re| (re, rr.replace.clone()))
-                            .map_err(|e| format!("invalid rewrite regex: {e}"))
+                            .map_err(|e| format!("invalid rewrite regex {:?}: {e}", rr.pattern))
                     })
                     .transpose()?;
                 Ok::<CompiledRewrite, String>(CompiledRewrite {

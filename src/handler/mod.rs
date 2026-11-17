@@ -131,10 +131,16 @@ fn compile_headers(
 ) -> Result<Vec<(HeaderName, HeaderValue)>, BuildError> {
     map.iter()
         .map(|(k, v)| {
-            let name = HeaderName::from_bytes(k.as_bytes())
-                .map_err(|_| BuildError::Invalid(format!("bad header name {k:?}")))?;
-            let value = HeaderValue::from_str(v)
-                .map_err(|_| BuildError::Invalid(format!("bad header value for {k}")))?;
+            let name = HeaderName::from_bytes(k.as_bytes()).map_err(|_| {
+                BuildError::Invalid(format!(
+                    "invalid header name {k:?} — e.g. \"x-custom-header\""
+                ))
+            })?;
+            let value = HeaderValue::from_str(v).map_err(|_| {
+                BuildError::Invalid(format!(
+                    "invalid header value for {k} — header values take visible ASCII only"
+                ))
+            })?;
             Ok((name, value))
         })
         .collect()
@@ -142,8 +148,11 @@ fn compile_headers(
 
 /// Compile a status code.
 fn compile_status(status: u16) -> Result<StatusCode, BuildError> {
-    StatusCode::from_u16(status)
-        .map_err(|_| BuildError::Invalid(format!("invalid status {status}")))
+    StatusCode::from_u16(status).map_err(|_| {
+        BuildError::Invalid(format!(
+            "invalid status {status} — use a valid HTTP status code"
+        ))
+    })
 }
 
 /// Substitute `{path}`, `{host}`, `{query}`, `{method}`, `{scheme}`,

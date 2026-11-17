@@ -838,7 +838,9 @@ pub struct Config {
 pub struct ServerConfig {
     /// Addresses to listen on. Defaults to a single plaintext listener on
     /// port 80. Entries are either `"ip:port"` strings or
-    /// `{ addr = "ip:port", tls = true }` tables to terminate TLS.
+    /// `{ addr = "ip:port", tls = true }` tables to terminate TLS;
+    /// `external_port` on a TLS entry overrides the port advertised in
+    /// HTTP→HTTPS redirects (e.g. behind NAT or `-p 443:8443`).
     #[schemars(with = "Vec<ListenAddrSchema>")]
     #[serde(deserialize_with = "one_or_many::deserialize")]
     pub listen: Vec<ListenAddr>,
@@ -955,7 +957,7 @@ pub struct RouteSecurity {
 }
 
 /// A single listen socket: an `"ip:port"` or `":port"` string or an
-/// `{ addr = "ip:port", tls = true }` table.
+/// `{ addr = "ip:port", tls = true, external_port = 443 }` table.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct ListenAddr {
     /// `IP:port` to bind, e.g. `0.0.0.0:80`, `":8080"` (wildcard) or
@@ -964,6 +966,11 @@ pub struct ListenAddr {
     pub addr: SocketAddr,
     /// Terminate TLS on this listener.
     pub tls: bool,
+    /// Port advertised in HTTP→HTTPS redirect `Location`s when it differs
+    /// from the bound port — NAT or container port publishing (e.g.
+    /// `443 → 8443`) makes the bound port unreachable. Unset advertises
+    /// `addr`'s port. Only meaningful with `tls = true`.
+    pub external_port: Option<u16>,
 }
 
 /// `":8080"` reads as all-interfaces wildcard — prepend `0.0.0.0`.
@@ -1026,7 +1033,8 @@ pub enum ServerHeaderSchema {
     Value(String),
 }
 
-/// `{ addr = "ip:port", tls = true }` listen entry table form.
+/// `{ addr = "ip:port", tls = true, external_port = 443 }` listen entry
+/// table form.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ListenAddrTable {
@@ -1034,6 +1042,8 @@ struct ListenAddrTable {
     addr: Option<String>,
     #[serde(default)]
     tls: bool,
+    #[serde(default)]
+    external_port: Option<u16>,
 }
 
 impl<'de> Deserialize<'de> for ListenAddr {
@@ -1043,12 +1053,12 @@ impl<'de> Deserialize<'de> for ListenAddr {
 }
 
 impl<'de> Shorthand<'de> for ListenAddr {
-    const EXPECTING: &'static str =
-        "listen entries must be \"ip:port\" or \":port\" strings or { addr, tls } tables";
+    const EXPECTING: &'static str = "listen entries must be \"ip:port\" or \":port\" strings or { addr, tls, external_port } tables";
     fn from_str(s: &str) -> Option<Self> {
         Some(Self {
             addr: parse_listen_addr(s).ok()?,
             tls: false,
+            external_port: None,
         })
     }
     fn from_map<A: serde::de::MapAccess<'de>>(m: A) -> Result<Self, A::Error> {
@@ -1068,22 +1078,30 @@ impl<'de> Shorthand<'de> for ListenAddr {
                     }
                 }),
             tls: t.tls,
+            external_port: t.external_port,
         })
     }
 }
 
-/// Schema shape for a `server.listen` entry (`"ip:port"` or `{addr, tls}`).
+/// Schema shape for a `server.listen` entry (`"ip:port"` or
+/// `{ addr, tls, external_port }`).
 #[derive(JsonSchema)]
 #[schemars(untagged)]
 pub enum ListenAddrSchema {
     /// `"ip:port"` or `":port"` (all interfaces) — a plaintext listener.
     Addr(String),
-    /// `{ addr = "ip:port", tls = true }` — both optional.
+    /// `{ addr = "ip:port", tls = true, external_port = 443 }` — all
+    /// optional.
     Full {
         /// `IP:port` to bind (default `0.0.0.0:80`, or `:443` when `tls`).
         addr: Option<String>,
         /// Terminate TLS on this listener (default `false`).
         tls: Option<bool>,
+        /// Port advertised in HTTP→HTTPS redirects when it differs from
+        /// the bound port, e.g. behind NAT or `-p 443:8443` port
+        /// publishing (default `addr`'s port). Only meaningful with
+        /// `tls = true`.
+        external_port: Option<u16>,
     },
 }
 
@@ -1092,6 +1110,7 @@ impl Default for ListenAddr {
         Self {
             addr: SocketAddr::from(([0, 0, 0, 0], 80)),
             tls: false,
+            external_port: None,
         }
     }
 }
@@ -3346,6 +3365,20 @@ mod tests {
         let l: ListenAddr = toml::from_str("").unwrap();
         assert_eq!(l.addr, SocketAddr::from(([0, 0, 0, 0], 80)));
         assert!(!l.tls);
+    }
+
+    #[test]
+    fn listen_external_port() {
+        // the advertised redirect port rides along in the table form
+        let l: ListenAddr =
+            toml::from_str("addr = \":8443\"\ntls = true\nexternal_port = 443\n").unwrap();
+        assert_eq!(l.addr, SocketAddr::from(([0, 0, 0, 0], 8443)));
+        assert!(l.tls);
+        assert_eq!(l.external_port, Some(443));
+
+        // a string entry never advertises a different port
+        let s: ServerConfig = toml::from_str("listen = [\"0.0.0.0:8080\"]\n").unwrap();
+        assert_eq!(s.listen[0].external_port, None);
     }
 
     #[test]

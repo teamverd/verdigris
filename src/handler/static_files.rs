@@ -49,12 +49,14 @@ impl Static {
         _site: &str,
     ) -> Result<Self, BuildError> {
         if c.root.as_os_str().is_empty() {
-            return Err(BuildError::Invalid("static root is empty".into()));
+            return Err(BuildError::Invalid(
+                "static root is empty — set it to a directory, e.g. static = \"./public\"".into(),
+            ));
         }
         for name in &c.index {
             if name.contains('/') || name == ".." || name == "." {
                 return Err(BuildError::Invalid(format!(
-                    "index name {name:?} must be a file name, not a path"
+                    "index name {name:?} must be a file name, not a path — e.g. \"index.html\""
                 )));
             }
         }
@@ -63,12 +65,16 @@ impl Static {
         // every matching request.
         for (ext, v) in &c.mime_types {
             HeaderValue::from_str(v).map_err(|_| {
-                BuildError::Invalid(format!("mime_types.{ext}: invalid header value {v:?}"))
+                BuildError::Invalid(format!(
+                    "mime_types.{ext}: {v:?} is not a valid header value — header values take visible ASCII only"
+                ))
             })?;
         }
         for (glob, v) in &c.cache_control {
             HeaderValue::from_str(v).map_err(|_| {
-                BuildError::Invalid(format!("cache_control.{glob}: invalid header value {v:?}"))
+                BuildError::Invalid(format!(
+                    "cache_control.{glob}: {v:?} is not a valid header value — header values take visible ASCII only"
+                ))
             })?;
         }
         Ok(Self {

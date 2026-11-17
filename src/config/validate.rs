@@ -197,7 +197,9 @@ fn check_security_tokens(
         if http::HeaderValue::from_str(v).is_err() {
             ctx.error(
                 format!("{path}.frame_options"),
-                format!("{v:?} is not a valid header value"),
+                format!(
+                    "{v:?} is not a valid header value — header values take visible ASCII only"
+                ),
             );
         } else if !token_set(v, &["deny", "sameorigin"]) {
             ctx.error(
@@ -214,7 +216,9 @@ fn check_security_tokens(
         if http::HeaderValue::from_str(v).is_err() {
             ctx.error(
                 format!("{path}.referrer_policy"),
-                format!("{v:?} is not a valid header value"),
+                format!(
+                    "{v:?} is not a valid header value — header values take visible ASCII only"
+                ),
             );
         } else if !token_set(v, &REFERRER_POLICIES) {
             ctx.error(
@@ -229,7 +233,7 @@ fn check_security_tokens(
     {
         ctx.error(
             format!("{path}.csp"),
-            format!("{v:?} is not a valid header value"),
+            format!("{v:?} is not a valid header value — header values take visible ASCII only"),
         );
     }
     if let Some(v) = cross_domain_policy
@@ -238,7 +242,9 @@ fn check_security_tokens(
         if http::HeaderValue::from_str(v).is_err() {
             ctx.error(
                 format!("{path}.cross_domain_policy"),
-                format!("{v:?} is not a valid header value"),
+                format!(
+                    "{v:?} is not a valid header value — header values take visible ASCII only"
+                ),
             );
         } else if !token_set(v, &CROSS_DOMAIN_POLICIES) {
             ctx.error(
@@ -317,7 +323,12 @@ fn check_method(ctx: &mut Ctx, path: String, m: &str, allow_star: bool) {
         return;
     }
     if http::Method::from_bytes(m.as_bytes()).is_err() {
-        ctx.error(path, format!("invalid HTTP method {m:?}"));
+        ctx.error(
+            path,
+            format!(
+                "invalid HTTP method {m:?} — expected a method token like \"GET\" or \"PURGE\""
+            ),
+        );
     } else if !STANDARD_METHODS.contains(&m) {
         ctx.warn(
             path,
@@ -343,15 +354,32 @@ fn looks_like_dns_name(s: &str) -> bool {
 
 fn check_listeners(ctx: &mut Ctx, cfg: &Config) {
     if cfg.server.listen.is_empty() {
-        ctx.error("server", "at least one listener is required");
+        ctx.error(
+            "server",
+            "at least one listener is required — e.g. listen = [\"0.0.0.0:8080\"]",
+        );
     }
     let mut seen = HashSet::new();
     for (i, l) in cfg.server.listen.iter().enumerate() {
         if !seen.insert(l.addr) {
             ctx.error(
                 format!("server.listen[{i}]"),
-                format!("duplicate listen address {}", l.addr),
+                format!(
+                    "duplicate listen address {} — remove the duplicate entry",
+                    l.addr
+                ),
             );
+        }
+        match l.external_port {
+            Some(0) => ctx.error(
+                format!("server.listen[{i}].external_port"),
+                "external_port must be 1–65535 — 0 is not a routable port",
+            ),
+            Some(_) if !l.tls => ctx.warn(
+                format!("server.listen[{i}].external_port"),
+                "external_port has no effect on a plaintext listener — only TLS listeners are redirect targets",
+            ),
+            _ => {}
         }
     }
     if cfg.server.max_connections == 0 {
@@ -384,7 +412,7 @@ fn check_listeners(ctx: &mut Ctx, cfg: &Config) {
     } else if !sh.is_empty() && http::HeaderValue::from_str(sh).is_err() {
         ctx.error(
             "server.server_header",
-            format!("{sh:?} is not a valid header value"),
+            format!("{sh:?} is not a valid header value — header values take visible ASCII only"),
         );
     }
     check_catchall_nets(
@@ -436,7 +464,10 @@ fn check_sites(ctx: &mut Ctx, cfg: &Config) {
         }
         let path = format!("{site_path}.hosts");
         if site.hosts.is_empty() && !site.default {
-            ctx.error(path, "site has no hosts and is not marked default");
+            ctx.error(
+                path,
+                "site has no hosts and is not marked default — set hosts = [...] or default = true",
+            );
         }
         if site.default {
             default_count += 1;
@@ -471,14 +502,18 @@ fn check_sites(ctx: &mut Ctx, cfg: &Config) {
                 if rest.is_empty() || rest.contains('*') {
                     ctx.error(
                         format!("{site_path}.hosts"),
-                        format!("invalid wildcard host {host:?}"),
+                        format!(
+                            "invalid wildcard host {host:?} — wildcards cover one label only: \"*.example.com\""
+                        ),
                     );
                     continue;
                 }
                 if wildcards.insert(rest, i).is_some() {
                     ctx.error(
                         format!("{site_path}.hosts"),
-                        format!("duplicate wildcard host {host:?}"),
+                        format!(
+                            "duplicate wildcard host {host:?} — each hostname belongs to one site"
+                        ),
                     );
                 }
                 continue;
@@ -498,12 +533,14 @@ fn check_sites(ctx: &mut Ctx, cfg: &Config) {
                 // sit in the exact index as a dead entry
                 ctx.error(
                     format!("{site_path}.hosts"),
-                    format!("invalid wildcard host {host:?}"),
+                    format!(
+                        "invalid wildcard host {host:?} — wildcards cover one label only: \"*.example.com\""
+                    ),
                 );
             } else if exact_hosts.insert(h, i).is_some() {
                 ctx.error(
                     format!("{site_path}.hosts"),
-                    format!("duplicate host {host:?}"),
+                    format!("duplicate host {host:?} — each hostname belongs to one site"),
                 );
             }
         }
@@ -531,13 +568,19 @@ fn check_sites(ctx: &mut Ctx, cfg: &Config) {
             if !m.cert.is_file() {
                 ctx.warn(
                     format!("{site_path}.tls.cert"),
-                    format!("certificate file {} does not exist", m.cert.display()),
+                    format!(
+                        "certificate file {} does not exist — point tls.cert at a PEM file",
+                        m.cert.display()
+                    ),
                 );
             }
             if !m.key.is_file() {
                 ctx.warn(
                     format!("{site_path}.tls.key"),
-                    format!("key file {} does not exist", m.key.display()),
+                    format!(
+                        "key file {} does not exist — point tls.key at a PEM private key",
+                        m.key.display()
+                    ),
                 );
             }
         }
@@ -573,7 +616,10 @@ fn check_sites(ctx: &mut Ctx, cfg: &Config) {
     }
 
     if default_count > 1 {
-        ctx.error("site", "more than one site is marked default");
+        ctx.error(
+            "site",
+            "more than one site is marked default — keep default = true on only one site",
+        );
     }
     if any_tls {
         let needs_acme = cfg
@@ -636,19 +682,19 @@ fn check_sites(ctx: &mut Ctx, cfg: &Config) {
         if !cfg.server.listen.iter().any(|l| l.tls) {
             ctx.warn(
                 "server.listen",
-                "sites have TLS enabled but no listener sets tls = true; HTTPS is unreachable",
+                "sites have TLS enabled but no listener sets tls = true; HTTPS is unreachable — add tls = true to a listener",
             );
         }
     } else if cfg.server.listen.iter().any(|l| l.tls) {
         ctx.warn(
             "server.listen",
-            "a TLS listener exists but every site has tls = \"off\"; all handshakes will fail",
+            "a TLS listener exists but every site has tls = \"off\"; all handshakes will fail — enable tls on a site or remove tls from the listener",
         );
     }
     if cfg.site.is_empty() {
         ctx.warn(
             "site",
-            "no sites configured; the server will only serve 404/421 responses",
+            "no sites configured; the server will only serve 404/421 responses — add a [site.<name>] section",
         );
     }
 }
@@ -872,7 +918,12 @@ fn check_route(
     if let Some(m) = &route.match_ {
         for method in &m.methods {
             if http::Method::from_bytes(method.as_bytes()).is_err() {
-                ctx.error(path.clone(), format!("invalid HTTP method {method:?}"));
+                ctx.error(
+                    path.clone(),
+                    format!(
+                        "invalid HTTP method {method:?} — expected a method token like \"GET\" or \"PURGE\""
+                    ),
+                );
             } else if !STANDARD_METHODS.contains(&method.as_str()) {
                 ctx.warn(
                     format!("{path}.match.methods"),
@@ -916,7 +967,7 @@ fn check_route(
             ctx.warn(
                 format!("{path}.static.root"),
                 format!(
-                    "root {} does not exist or is not a directory",
+                    "root {} does not exist or is not a directory — create it or fix static.root",
                     st.root.display()
                 ),
             );
@@ -1164,7 +1215,7 @@ fn check_route_cache(ctx: &mut Ctx, cfg: &Config, path: &str, cache: &RouteCache
         if http::HeaderName::from_bytes(h.as_bytes()).is_err() {
             ctx.error(
                 format!("{path}.cache.bypass.headers"),
-                format!("invalid header name {h:?}"),
+                format!("invalid header name {h:?} — e.g. \"x-custom-header\""),
             );
         }
     }
@@ -1188,7 +1239,7 @@ fn check_route_cache(ctx: &mut Ctx, cfg: &Config, path: &str, cache: &RouteCache
         if http::HeaderName::from_bytes(h.as_bytes()).is_err() {
             ctx.error(
                 format!("{path}.cache.vary_headers"),
-                format!("invalid header name {h:?}"),
+                format!("invalid header name {h:?} — e.g. \"x-custom-header\""),
             );
         }
     }
@@ -1257,7 +1308,10 @@ fn check_patterns(ctx: &mut Ctx, path: &str, kind: &str, pats: &BTreeMap<String,
         if let Some(pat) = v.strip_prefix("re:")
             && let Err(e) = Regex::new(pat)
         {
-            ctx.error(format!("{path}.{kind}.{k}"), format!("invalid regex: {e}"));
+            ctx.error(
+                format!("{path}.{kind}.{k}"),
+                format!("invalid regex: {e} — fix the pattern after the \"re:\" prefix"),
+            );
         }
     }
 }
@@ -1305,7 +1359,11 @@ fn check_upstream_ref(ctx: &mut Ctx, cfg: &Config, path: &str, upstream: &Upstre
         }
         UpstreamRef::Urls(urls) => {
             if urls.is_empty() {
-                ctx.error(path.to_string(), "upstream URL list is empty".to_string());
+                ctx.error(
+                    path.to_string(),
+                    "upstream URL list is empty — add at least one, e.g. upstream = [\"http://127.0.0.1:9000\"]"
+                        .to_string(),
+                );
             }
             for url in urls {
                 check_upstream_url(ctx, path, url);
@@ -1328,7 +1386,7 @@ fn check_redirect(ctx: &mut Ctx, path: &str, redir: &RedirectHandler) {
     if targets != 1 {
         ctx.error(
             path.to_owned(),
-            "redirect sets exactly one of to/host/scheme",
+            "redirect sets exactly one of to/host/scheme — \"to\" for a full target, \"host\" to keep the path, \"scheme\" to upgrade",
         );
     }
     if ![301, 302, 303, 307, 308].contains(&redir.status) {
@@ -1398,7 +1456,10 @@ fn check_respond(ctx: &mut Ctx, path: &str, resp: &RespondHandler) {
     if !(100..=599).contains(&resp.status) {
         ctx.error(
             path.to_owned(),
-            format!("respond status {} is not a valid HTTP status", resp.status),
+            format!(
+                "respond status {} is not a valid HTTP status — use 100–599",
+                resp.status
+            ),
         );
     }
     // `respond = "404"` (quoted) is a body, not a status — the slip
@@ -1532,7 +1593,7 @@ fn check_proxy(ctx: &mut Ctx, cfg: &Config, path: &str, proxy: &ProxyHandler) {
         if kinds != 1 {
             ctx.error(
                 format!("{path}.proxy.rewrite"),
-                "rewrite sets exactly one of strip_prefix/replace_prefix/regex",
+                "rewrite sets exactly one of strip_prefix/replace_prefix/regex — pick one rewrite kind",
             );
         }
         if let Some(re) = &rw.regex
@@ -1540,7 +1601,7 @@ fn check_proxy(ctx: &mut Ctx, cfg: &Config, path: &str, proxy: &ProxyHandler) {
         {
             ctx.error(
                 format!("{path}.proxy.rewrite.regex"),
-                format!("invalid regex: {e}"),
+                format!("invalid regex: {e} — check the pattern syntax"),
             );
         }
         if let Some(p) = &rw.strip_prefix
@@ -1598,7 +1659,10 @@ fn check_auth(ctx: &mut Ctx, path: &str, auth: &AuthConfig) {
             );
         }
         if basic.users.is_empty() && basic.htpasswd.is_none() {
-            ctx.error(format!("{path}.auth.basic"), "set users or htpasswd");
+            ctx.error(
+                format!("{path}.auth.basic"),
+                "set users or htpasswd — e.g. users = { alice = \"$argon2id$...\" } or htpasswd = \"./.htpasswd\"",
+            );
         }
         for (user, hash) in &basic.users {
             if !looks_like_password_hash(hash) {
@@ -1638,7 +1702,10 @@ fn check_auth(ctx: &mut Ctx, path: &str, auth: &AuthConfig) {
     }
     if let Some(bearer) = &auth.bearer {
         if bearer.tokens.is_empty() {
-            ctx.error(format!("{path}.auth.bearer"), "tokens list is empty");
+            ctx.error(
+                format!("{path}.auth.bearer"),
+                "tokens list is empty — add at least one token",
+            );
         }
         for (i, t) in bearer.tokens.iter().enumerate() {
             if t.trim().is_empty() {
@@ -1654,7 +1721,10 @@ fn check_auth(ctx: &mut Ctx, path: &str, auth: &AuthConfig) {
             ctx.error(format!("{path}.auth.api_key"), "name must not be empty");
         }
         if key.keys.is_empty() {
-            ctx.error(format!("{path}.auth.api_key"), "keys list is empty");
+            ctx.error(
+                format!("{path}.auth.api_key"),
+                "keys list is empty — add at least one key",
+            );
         }
         for (i, k) in key.keys.iter().enumerate() {
             if k.is_empty() {
@@ -1717,7 +1787,7 @@ fn check_rate_limit(ctx: &mut Ctx, path: &str, rl: &RateLimitConfig) {
         {
             ctx.error(
                 format!("{path}.rate_limit.key"),
-                format!("{h:?} is not a valid header name"),
+                format!("{h:?} is not a valid header name — e.g. \"x-api-key\""),
             );
         }
     }
@@ -1730,11 +1800,11 @@ fn check_rate_limit(ctx: &mut Ctx, path: &str, rl: &RateLimitConfig) {
     match rl.rate {
         None => ctx.error(
             format!("{path}.rate_limit.rate"),
-            "rate is required when rate limiting is enabled",
+            "rate is required when rate limiting is enabled — e.g. rate = \"100/s\"",
         ),
         Some(spec) if spec.permits == 0 => ctx.error(
             format!("{path}.rate_limit.rate"),
-            "rate must be greater than zero",
+            "rate must be greater than zero — e.g. rate = \"100/s\"",
         ),
         Some(_) => {}
     }
@@ -1803,7 +1873,7 @@ fn check_cors(ctx: &mut Ctx, path: &str, cors: &CorsConfig) {
             if h != "*" && http::HeaderName::from_bytes(h.as_bytes()).is_err() {
                 ctx.error(
                     format!("{path}.cors.{field}"),
-                    format!("invalid header name {h:?}"),
+                    format!("invalid header name {h:?} — e.g. \"x-custom-header\""),
                 );
             }
         }
@@ -1846,12 +1916,15 @@ fn check_upstreams(ctx: &mut Ctx, cfg: &Config) {
             );
         }
         if up.servers.is_empty() {
-            ctx.error(path.clone(), "upstream has no servers");
+            ctx.error(
+                path.clone(),
+                "upstream has no servers — add servers = [\"http://...\"]",
+            );
         }
         if up.max_connections == 0 {
             ctx.error(
                 format!("{path}.max_connections"),
-                "max_connections must be > 0",
+                "max_connections must be > 0 — 0 rejects every request",
             );
         }
         let mut seen_urls = HashSet::new();
@@ -1863,7 +1936,10 @@ fn check_upstreams(ctx: &mut Ctx, cfg: &Config) {
                 );
             }
             if srv.weight == 0 {
-                ctx.error(format!("{path}.servers"), "server weight must be >= 1");
+                ctx.error(
+                    format!("{path}.servers"),
+                    "server weight must be >= 1 — weight is a relative share; 1 is the default",
+                );
             }
             check_upstream_url(ctx, &path, &srv.url);
         }
@@ -1926,7 +2002,10 @@ fn check_upstreams(ctx: &mut Ctx, cfg: &Config) {
         {
             ctx.warn(
                 format!("{path}.tls.ca"),
-                format!("CA bundle {} does not exist", ca.display()),
+                format!(
+                    "CA bundle {} does not exist — point tls.ca at a PEM bundle",
+                    ca.display()
+                ),
             );
         }
         if let Some(active) = &up.health.active
@@ -1967,7 +2046,7 @@ fn check_proxy_retries(ctx: &mut Ctx, path: &str, retries: &crate::config::model
     if !(0.0..=1.0).contains(&retries.budget_fraction) {
         ctx.error(
             format!("{path}.retries.budget_fraction"),
-            "budget_fraction must be between 0 and 1",
+            "budget_fraction must be between 0 and 1 — it caps the share of requests that may retry, e.g. 0.2",
         );
     }
 }
@@ -1987,7 +2066,7 @@ fn check_upstream_url(ctx: &mut Ctx, path: &str, url: &str) {
             {
                 ctx.error(
                     path.to_string(),
-                    format!("upstream URL {url:?} has no host"),
+                    format!("upstream URL {url:?} has no host — e.g. \"http://127.0.0.1:9000\""),
                 );
                 return;
             }
@@ -1995,7 +2074,9 @@ fn check_upstream_url(ctx: &mut Ctx, path: &str, url: &str) {
         _ => {
             ctx.error(
                 path.to_string(),
-                format!("upstream URL {url:?} must have scheme http, https, or h2c"),
+                format!(
+                    "upstream URL {url:?} must have scheme http, https, or h2c — e.g. \"http://127.0.0.1:9000\""
+                ),
             );
             return;
         }
@@ -2033,14 +2114,20 @@ fn check_caches(ctx: &mut Ctx, cfg: &Config) {
                     );
                 }
                 if store.ram_bytes.0 == 0 {
-                    ctx.error(path.clone(), "ram_bytes must be > 0 for tier = \"ram\"");
+                    ctx.error(
+                        path.clone(),
+                        "ram_bytes must be > 0 for tier = \"ram\" — e.g. ram_bytes = \"256m\"",
+                    );
                 }
             }
             CacheTier::Disk | CacheTier::Hybrid => {
                 if store.disk_path.is_none() {
                     ctx.error(
                         path.clone(),
-                        format!("disk_path required for tier = {:?}", store.tier),
+                        format!(
+                            "disk_path required for tier = {:?} — set a directory, e.g. disk_path = \"/var/cache/verd\"",
+                            store.tier
+                        ),
                     );
                 } else if let Err(e) = crate::cache::disk::Disk::check_path(store) {
                     ctx.error(format!("{path}.disk_path"), e);
@@ -2048,19 +2135,28 @@ fn check_caches(ctx: &mut Ctx, cfg: &Config) {
                 if store.disk_bytes.0 == 0 {
                     ctx.error(
                         path.clone(),
-                        "disk_bytes must be > 0 for a disk-backed tier",
+                        "disk_bytes must be > 0 for a disk-backed tier — e.g. disk_bytes = \"1g\"",
                     );
                 }
             }
         }
         if store.tier == CacheTier::Hybrid && store.ram_bytes.0 == 0 {
-            ctx.error(path.clone(), "ram_bytes must be > 0 for tier = \"hybrid\"");
+            ctx.error(
+                path.clone(),
+                "ram_bytes must be > 0 for tier = \"hybrid\" — it is the in-front tier, e.g. \"64m\"",
+            );
         }
         if store.max_object_bytes.0 == 0 {
-            ctx.error(path.clone(), "max_object_bytes must be > 0");
+            ctx.error(
+                path.clone(),
+                "max_object_bytes must be > 0 — larger objects skip the cache; e.g. \"10m\"",
+            );
         }
         if store.max_items == 0 {
-            ctx.error(path.clone(), "max_items = 0 caches nothing");
+            ctx.error(
+                path.clone(),
+                "max_items = 0 caches nothing — raise it or remove the store",
+            );
         }
     }
 }
@@ -2098,7 +2194,7 @@ fn check_admin(ctx: &mut Ctx, cfg: &Config) {
         if !seen.insert(*l) {
             ctx.error(
                 format!("admin.listen[{i}]"),
-                format!("duplicate listen address {l}"),
+                format!("duplicate listen address {l} — remove the duplicate entry"),
             );
         }
         if cfg.server.listen.iter().any(|sl| sl.addr == *l) {
@@ -2127,7 +2223,7 @@ fn check_admin(ctx: &mut Ctx, cfg: &Config) {
             if !p.is_file() {
                 ctx.warn(
                     format!("admin.tls.{field}"),
-                    format!("file {} does not exist", p.display()),
+                    format!("file {} does not exist — check the path", p.display()),
                 );
             }
         }
@@ -2157,13 +2253,19 @@ fn check_acme(ctx: &mut Ctx, cfg: &Config) {
     if !acme.directory.starts_with("https://") && !acme.directory.starts_with("http://") {
         ctx.error(
             "acme.directory",
-            format!("{:?} is not an http(s) URL", acme.directory),
+            format!(
+                "{:?} is not an http(s) URL — e.g. \"https://acme-v02.api.letsencrypt.org/directory\"",
+                acme.directory
+            ),
         );
     }
     if let Some(eab) = &acme.eab
         && (eab.key_id.is_empty() || eab.key.is_empty())
     {
-        ctx.error("acme.eab", "EAB requires both key_id and key");
+        ctx.error(
+            "acme.eab",
+            "EAB requires both key_id and key — set both, or remove [acme.eab]",
+        );
     }
     let od = &acme.on_demand;
     if od.enabled && od.allowed_hosts.is_empty() {
@@ -2207,7 +2309,10 @@ fn check_acme(ctx: &mut Ctx, cfg: &Config) {
     {
         ctx.warn(
             "acme.ca_roots",
-            format!("CA bundle {} does not exist", cr.display()),
+            format!(
+                "CA bundle {} does not exist — point acme.ca_roots at a PEM bundle",
+                cr.display()
+            ),
         );
     }
     if od.enabled && od.rate.is_none() {
@@ -2229,16 +2334,24 @@ fn check_acme(ctx: &mut Ctx, cfg: &Config) {
     }
     if let Some(AcmeDns::Cloudflare(cf)) = &acme.dns {
         if cf.api_token.trim().is_empty() {
-            ctx.error("acme.dns.cloudflare.api_token", "API token is empty");
+            ctx.error(
+                "acme.dns.cloudflare.api_token",
+                "API token is empty — set api_token (use \"${CF_API_TOKEN}\" to keep it out of the file)",
+            );
         }
         if cf.zone_id.as_deref().is_some_and(|z| z.trim().is_empty()) {
-            ctx.error("acme.dns.cloudflare.zone_id", "zone id is empty");
+            ctx.error(
+                "acme.dns.cloudflare.zone_id",
+                "zone id is empty — set it, or remove zone_id to use the token's zone permissions",
+            );
         }
         if let Some(b) = &cf.api_base {
             if !b.starts_with("https://") && !b.starts_with("http://") {
                 ctx.error(
                     "acme.dns.cloudflare.api_base",
-                    format!("{b:?} is not an http(s) URL"),
+                    format!(
+                        "{b:?} is not an http(s) URL — e.g. \"https://api.cloudflare.com/client/v4\""
+                    ),
                 );
             } else if b.starts_with("http://") {
                 ctx.warn(
@@ -2274,7 +2387,10 @@ fn check_timeouts_limits(ctx: &mut Ctx, cfg: &Config) {
         );
     }
     if cfg.limits.header_bytes.0 == 0 {
-        ctx.error("limits.header_bytes", "must be > 0");
+        ctx.error(
+            "limits.header_bytes",
+            "must be > 0 — 0B rejects every request",
+        );
     }
     if cfg.limits.header_bytes.0 > 1024 * 1024 {
         ctx.warn(
@@ -2283,7 +2399,10 @@ fn check_timeouts_limits(ctx: &mut Ctx, cfg: &Config) {
         );
     }
     if cfg.limits.body_bytes.0 == 0 {
-        ctx.error("limits.body_bytes", "must be > 0");
+        ctx.error(
+            "limits.body_bytes",
+            "must be > 0 — 0B rejects every request with a body",
+        );
     }
     if t.send.is_zero() {
         ctx.warn(
@@ -2391,7 +2510,10 @@ fn check_log(ctx: &mut Ctx, cfg: &Config) {
         );
     }
     if !(0.0..=1.0).contains(&cfg.log.access.sample) {
-        ctx.error("log.access.sample", "must be within 0.0–1.0");
+        ctx.error(
+            "log.access.sample",
+            "must be within 0.0–1.0 — e.g. 0.1 keeps 10% of entries",
+        );
     }
     if let Some(f) = &cfg.log.access.filter
         && let Err(e) = crate::observe::Filter::parse(f)
@@ -2763,6 +2885,35 @@ max_connections_per_ip = 100
             "server.max_connections_per_ip",
             "per-IP limit exceeds"
         ));
+    }
+
+    #[test]
+    fn listen_external_port_checks() {
+        // 0 is not a routable port
+        let cfg = parse_test_config(
+            "[server]\nlisten = [{ addr = \"127.0.0.1:8443\", tls = true, external_port = 0 }]",
+        );
+        assert!(has_err(&cfg, "server.listen[0].external_port", "1–65535"));
+
+        // set on a plaintext listener: dead config worth a warning
+        let cfg = parse_test_config(
+            "[server]\nlisten = [{ addr = \"127.0.0.1:8080\", external_port = 443 }]",
+        );
+        assert!(has_warn(
+            &cfg,
+            "server.listen[0].external_port",
+            "no effect on a plaintext listener"
+        ));
+
+        // a valid override on a TLS listener is quiet
+        let cfg = parse_test_config(
+            "[server]\nlisten = [{ addr = \"127.0.0.1:8443\", tls = true, external_port = 443 }]",
+        );
+        assert!(
+            validate(&cfg)
+                .iter()
+                .all(|d| !d.path.contains("external_port"))
+        );
     }
 
     #[test]
