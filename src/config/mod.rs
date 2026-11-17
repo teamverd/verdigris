@@ -2098,7 +2098,7 @@ proxy = "http://user:pass@127.0.0.1:9000"
     }
 
     #[test]
-    fn graceful_timeout_accepts_humantime() {
+    fn graceful_timeout_accepts_duration_string() {
         let dir = tempfile::tempdir().unwrap();
         let path = write(
             dir.path(),

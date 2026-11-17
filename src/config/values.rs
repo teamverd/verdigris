@@ -4,6 +4,7 @@
 use std::fmt;
 use std::time::Duration;
 
+use fundu::{CustomDurationParser, CustomDurationParserBuilder, CustomTimeUnit, TimeUnit};
 use schemars::JsonSchema;
 use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -171,9 +172,85 @@ pub mod cidr {
     }
 }
 
+/// The duration-string grammar: `ns`, `us`/`µs`, `ms`, `s`, `m`, `h`,
+/// `d`, `w`, `M` (month, year/12), `y` (year, 365.25d) plus word
+/// aliases — in compound (`"2h 37m"`) or fractional (`"1.5h"`) form.
+/// A unit is required; the bare string `"0"` is the only unit-less
+/// exception.
+fn duration_parser() -> &'static CustomDurationParser<'static> {
+    static PARSER: std::sync::LazyLock<CustomDurationParser<'static>> =
+        std::sync::LazyLock::new(|| {
+            use TimeUnit::*;
+            CustomDurationParserBuilder::new()
+                .time_units(&[
+                    CustomTimeUnit::with_default(NanoSecond, &["ns", "nsec", "nanos"]),
+                    CustomTimeUnit::with_default(MicroSecond, &["us", "usec", "µs"]),
+                    CustomTimeUnit::with_default(MilliSecond, &["ms", "msec", "millis"]),
+                    CustomTimeUnit::with_default(
+                        Second,
+                        &["s", "sec", "secs", "second", "seconds"],
+                    ),
+                    CustomTimeUnit::with_default(
+                        Minute,
+                        &["m", "min", "mins", "minute", "minutes"],
+                    ),
+                    CustomTimeUnit::with_default(Hour, &["h", "hr", "hrs", "hour", "hours"]),
+                    CustomTimeUnit::with_default(Day, &["d", "day", "days"]),
+                    CustomTimeUnit::with_default(Week, &["w", "wk", "wks", "week", "weeks"]),
+                    CustomTimeUnit::with_default(Month, &["M", "month", "months"]),
+                    CustomTimeUnit::with_default(Year, &["y", "yr", "yrs", "year", "years"]),
+                ])
+                .allow_time_unit_delimiter()
+                .parse_multiple(None)
+                .disable_infinity()
+                .disable_exponent()
+                .build()
+        });
+    &PARSER
+}
+
+/// Parse a duration string like `"180d"` or `"1.5h"`.
+pub fn parse_duration(s: &str) -> Result<Duration, String> {
+    if s == "0" {
+        return Ok(Duration::ZERO);
+    }
+    // fundu defaults a unit-less number to seconds — here every
+    // number must carry a unit (`"0"` above stays the exception)
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if !c.is_ascii_digit() {
+            continue;
+        }
+        // consume the rest of the number incl. any fraction
+        while matches!(chars.peek(), Some(d) if d.is_ascii_digit()) {
+            chars.next();
+        }
+        if matches!(chars.peek(), Some('.')) {
+            chars.next();
+            while matches!(chars.peek(), Some(d) if d.is_ascii_digit()) {
+                chars.next();
+            }
+        }
+        // whitespace may separate the number and its unit ("15 min")
+        while matches!(chars.peek(), Some(c) if c.is_whitespace()) {
+            chars.next();
+        }
+        if !matches!(chars.peek(), Some(c) if c.is_alphabetic()) {
+            return Err(format!("time unit needed in {s:?}"));
+        }
+    }
+    let d = duration_parser().parse(s).map_err(|e| e.to_string())?;
+    // fundu saturates overflowing input at Duration::MAX — reject it
+    // like humantime did, so a typo can't pin a timeout forever
+    let d = Duration::try_from(d).map_err(|_| "invalid duration".to_string())?;
+    if d == Duration::MAX {
+        return Err("duration too large".to_string());
+    }
+    Ok(d)
+}
+
 /// Canonical short form for a [`Duration`]: the largest unit that
-/// divides it evenly (`"180d"`, `"2h"`, `"90s"`), falling back to
-/// humantime's compound form when no single unit is exact. Used when
+/// divides it evenly (`"180d"`, `"2h"`, `"9001500ms"`). Used when
 /// serializing durations back out (`verd config`, schema defaults).
 pub fn format_duration(d: Duration) -> String {
     let ns = d.as_nanos();
@@ -191,10 +268,12 @@ pub fn format_duration(d: Duration) -> String {
             return format!("{}{}", ns / unit_ns, suffix);
         }
     }
-    humantime::format_duration(d).to_string()
+    // every nonzero duration is an exact multiple of `ns` — only
+    // Duration::ZERO falls through
+    "0s".to_string()
 }
 
-/// Serde adapter for [`Duration`] fields: humantime strings only
+/// Serde adapter for [`Duration`] fields: duration strings only
 /// (`"30s"`, `"180d"`). Serializes as the compact canonical string.
 pub mod duration {
     use std::time::Duration;
@@ -202,10 +281,10 @@ pub mod duration {
     use serde::de::Error;
     use serde::{Deserialize, Deserializer, Serializer};
 
-    /// Deserialize a humantime string like `"180d"`.
+    /// Deserialize a duration string like `"180d"`.
     pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Duration, D::Error> {
         let s = String::deserialize(d)?;
-        humantime::parse_duration(&s).map_err(Error::custom)
+        super::parse_duration(&s).map_err(Error::custom)
     }
 
     /// Serialize as `"180d"`.
@@ -220,10 +299,10 @@ pub mod duration {
         use serde::de::Error;
         use serde::{Deserialize, Deserializer, Serializer};
 
-        /// Deserialize `null` or a humantime string.
+        /// Deserialize `null` or a duration string.
         pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Duration>, D::Error> {
             Option::<String>::deserialize(d)?
-                .map(|s| humantime::parse_duration(&s).map_err(Error::custom))
+                .map(|s| super::super::parse_duration(&s).map_err(Error::custom))
                 .transpose()
         }
 
@@ -338,8 +417,8 @@ impl Serialize for ByteSize {
 
 /// A rate like `100/s`, `600/m`, `10000/h`, `50000/day`, or `10/30s`
 /// for arbitrary periods. Units: `s`, `m`, `h`, `d` or the words
-/// `second`, `minute`, `hour`, `day` (also plural), or a humantime
-/// duration.
+/// `second`, `minute`, `hour`, `day` (also plural), or a duration
+/// string.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, JsonSchema)]
 pub struct RateSpec {
     /// Number of permits granted per `period`.
@@ -369,8 +448,7 @@ impl RateSpec {
             "m" | "min" | "minute" | "minutes" => Duration::from_secs(60),
             "h" | "hr" | "hour" | "hours" => Duration::from_secs(3600),
             "d" | "day" | "days" => Duration::from_secs(86400),
-            other => humantime::parse_duration(other)
-                .map_err(|_| format!("invalid rate unit in {s:?}"))?,
+            other => parse_duration(other).map_err(|_| format!("invalid rate unit in {s:?}"))?,
         };
         Ok(Self { permits, period })
     }
@@ -405,6 +483,89 @@ impl Serialize for RateSpec {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn duration_parses_unit_matrix() {
+        // the full unit set with its aliases — the grammar documented
+        // in docs/book/src/configuration.md
+        for (s, want) in [
+            ("33ns", Duration::new(0, 33)),
+            ("17nsec", Duration::new(0, 17)),
+            ("17nanos", Duration::new(0, 17)),
+            ("78us", Duration::new(0, 78_000)),
+            ("3usec", Duration::new(0, 3_000)),
+            ("163µs", Duration::new(0, 163_000)),
+            ("6ms", Duration::new(0, 6_000_000)),
+            ("31msec", Duration::new(0, 31_000_000)),
+            ("3000s", Duration::new(3000, 0)),
+            ("300sec", Duration::new(300, 0)),
+            ("50seconds", Duration::new(50, 0)),
+            ("100m", Duration::new(6000, 0)),
+            ("12min", Duration::new(720, 0)),
+            ("1minute", Duration::new(60, 0)),
+            ("2h", Duration::new(7200, 0)),
+            ("7hr", Duration::new(25200, 0)),
+            ("24hours", Duration::new(86400, 0)),
+            ("1day", Duration::new(86400, 0)),
+            ("365d", Duration::new(31_536_000, 0)),
+            ("52w", Duration::new(31_449_600, 0)),
+            ("2weeks", Duration::new(1_209_600, 0)),
+            ("12M", Duration::new(31_557_600, 0)),
+            ("1month", Duration::new(2_629_800, 0)),
+            ("17y", Duration::new(536_479_200, 0)),
+            ("1year", Duration::new(31_557_600, 0)),
+        ] {
+            assert_eq!(parse_duration(s).unwrap(), want, "{s}");
+        }
+    }
+
+    #[test]
+    fn duration_compound_fractional_and_rejects() {
+        // compound with and without separators, fractions
+        assert_eq!(parse_duration("2h37m").unwrap(), Duration::new(9420, 0));
+        assert_eq!(parse_duration("2h 37m").unwrap(), Duration::new(9420, 0));
+        assert_eq!(
+            parse_duration("20 min 17 nsec").unwrap(),
+            Duration::new(1200, 17)
+        );
+        assert_eq!(parse_duration("1.5h").unwrap(), Duration::new(5400, 0));
+        assert_eq!(
+            parse_duration("4.2s").unwrap(),
+            Duration::new(4, 200_000_000)
+        );
+        // bare "0" is the only unit-less value
+        assert_eq!(parse_duration("0").unwrap(), Duration::ZERO);
+        assert!(parse_duration("30").is_err());
+        assert!(parse_duration("1 5h").is_err());
+        assert!(parse_duration("2h30").is_err());
+        assert!(parse_duration("").is_err());
+        assert!(parse_duration("h").is_err());
+        // overflow errors rather than pinning a duration forever
+        assert!(parse_duration("100000000000000000000s").is_err());
+        assert!(parse_duration("10000000000000y").is_err());
+    }
+
+    #[test]
+    fn duration_format_roundtrips() {
+        // canonical form stays single-unit; compounds must re-parse
+        for d in [
+            Duration::ZERO,
+            Duration::from_secs(30),
+            Duration::from_secs(180 * 86400),
+            Duration::new(9420, 0),
+            Duration::new(9001, 500_000_000),
+            Duration::new(31_557_600 + 2_629_800 + 90, 123_456_789),
+        ] {
+            assert_eq!(parse_duration(&format_duration(d)).unwrap(), d);
+        }
+        // largest exact unit wins
+        assert_eq!(format_duration(Duration::new(9420, 0)), "157m");
+        assert_eq!(
+            format_duration(Duration::new(9001, 500_000_000)),
+            "9001500ms"
+        );
+        assert_eq!(format_duration(Duration::ZERO), "0s");
+    }
 
     #[test]
     fn byte_size_parses_units() {

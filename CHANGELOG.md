@@ -11,6 +11,14 @@ workflow publishes the matching section as the GitHub release notes.
 
 ## [Unreleased]
 
+### Changed
+
+- **Duration strings now parse via `fundu` instead of `humantime`** —
+  `humantime` was flagged unmaintained (RUSTSEC-2026-0542); accepted
+  forms are unchanged (`"30s"`, `"2h 37m"`, `"180d"`, word aliases),
+  but `M` now means a twelfth of a year (30d 10h 30m, was 30.44d) and
+  overflowing values are rejected rather than saturating
+
 ### Fixed
 
 - **`match.headers.host` now sees the h2 `:authority`** — HTTP/2
