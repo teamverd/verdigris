@@ -33,30 +33,62 @@ fn write_cfg_ex(path: &std::path::Path, port: u16, admin_port: u16, admin_extra:
     std::fs::write(path, text).unwrap();
 }
 
-/// Start a reloadable server: returns base URL, admin URL, the shared
-/// handle, the reload channel, and the shutdown sender. The config file
-/// at `config_path` is (re)written with bound ports embedded — tests must
-/// pass the ports through `ports()` when rewriting the file.
+/// Start a reloadable server: picks free ports, writes `body` (plus any
+/// `[admin]` extras) to `config_path`, spawns server + admin, and waits
+/// for readiness. Returns base URL, admin URL, the shared handle, the
+/// reload channel, the shutdown sender, and the bound ports — tests must
+/// pass the ports through when rewriting the file.
+///
+/// `portpicker` is check-then-bind: a parallel test can steal a picked
+/// port before the listener binds, which kills the spawn task before
+/// `ready` is set. Failed attempts are retried with fresh ports.
 async fn start(
     config_path: &std::path::Path,
+    admin_extra: &str,
+    body: &str,
 ) -> (
     String,
     String,
     Arc<Shared>,
     tokio::sync::mpsc::Sender<server::Reload>,
     tokio::sync::watch::Sender<bool>,
+    u16,
+    u16,
 ) {
+    for _ in 0..8 {
+        let port = portpicker::pick_unused_port().unwrap();
+        let admin_port = portpicker::pick_unused_port().unwrap();
+        write_cfg_ex(config_path, port, admin_port, admin_extra, body);
+        if let Some((base, admin, shared, tx, sd)) = try_start(config_path).await {
+            return (base, admin, shared, tx, sd, port, admin_port);
+        }
+    }
+    panic!("server never came up — listener binds kept losing the port race");
+}
+
+/// Single attempt behind [`start`]. `None` when the server or admin task
+/// died before reporting ready — with the shutdown sender still held,
+/// early exit means a bind failure, so retry with fresh ports.
+async fn try_start(
+    config_path: &std::path::Path,
+) -> Option<(
+    String,
+    String,
+    Arc<Shared>,
+    tokio::sync::mpsc::Sender<server::Reload>,
+    tokio::sync::watch::Sender<bool>,
+)> {
     let loaded = verd::config::load(config_path).expect("config loads");
     assert!(loaded.is_valid(), "{:?}", loaded.diagnostics);
     let cfg = loaded.config;
     let port = cfg.server.listen[0].addr.port();
-    let admin_port = cfg.admin.listen[0].port();
+    let admin_addr = cfg.admin.listen[0];
 
     let rt = Runtime::build(Arc::new(cfg)).expect("runtime builds");
     let shared = Shared::new(rt);
     let (reload_tx, reload_rx) = tokio::sync::mpsc::channel(4);
     let (tx, rx) = tokio::sync::watch::channel(false);
-    {
+    let server_task = {
         let shared = shared.clone();
         let mut rx = rx.clone();
         let path = config_path.to_path_buf();
@@ -65,27 +97,34 @@ async fn start(
                 let _ = rx.changed().await;
             })
             .await
-        });
-    }
-    {
+        })
+    };
+    let admin_task = {
         let shared = shared.clone();
         let rx = rx.clone();
         let tx = reload_tx.clone();
-        tokio::spawn(async move { verd::admin::serve(shared, tx, rx).await });
-    }
-    for _ in 0..100 {
-        if shared.load().ready.load(Ordering::Relaxed) {
+        tokio::spawn(async move { verd::admin::serve(shared, tx, rx).await })
+    };
+    for _ in 0..150 {
+        if server_task.is_finished() || admin_task.is_finished() {
             break;
+        }
+        if shared.load().ready.load(Ordering::Relaxed)
+            && tokio::net::TcpStream::connect(admin_addr).await.is_ok()
+        {
+            return Some((
+                format!("http://127.0.0.1:{port}"),
+                format!("http://{admin_addr}"),
+                shared,
+                reload_tx,
+                tx,
+            ));
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    (
-        format!("http://127.0.0.1:{port}"),
-        format!("http://127.0.0.1:{admin_port}"),
-        shared,
-        reload_tx,
-        tx,
-    )
+    server_task.abort();
+    admin_task.abort();
+    None
 }
 
 /// Trigger a reload through the channel and wait for the result.
@@ -107,10 +146,7 @@ async fn reload_via_channel(tx: &tokio::sync::mpsc::Sender<server::Reload>) -> R
 async fn reload_swaps_config_under_load() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("verd.toml");
-    let port = portpicker::pick_unused_port().unwrap();
-    let admin_port = portpicker::pick_unused_port().unwrap();
-    write_cfg(&path, port, admin_port, BASE_CFG);
-    let (base, _admin, shared, tx, sd) = start(&path).await;
+    let (base, _admin, shared, tx, sd, port, admin_port) = start(&path, "", BASE_CFG).await;
     let gen0 = shared.load();
 
     // steady request load while the config file and reload flip
@@ -168,18 +204,27 @@ respond = { status = 200, body = "v2\n" }
 async fn reload_listener_diff_adds_and_removes() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("verd.toml");
-    let old_port = portpicker::pick_unused_port().unwrap();
-    let admin_port = portpicker::pick_unused_port().unwrap();
-    write_cfg(&path, old_port, admin_port, BASE_CFG);
-    let (_base, _admin, shared, tx, sd) = start(&path).await;
-    let new_port = portpicker::pick_unused_port().unwrap();
+    let (_base, _admin, shared, tx, sd, old_port, admin_port) = start(&path, "", BASE_CFG).await;
 
-    // add a second listener: both serve the same generation
-    let both = format!(
-        "[[server.listen]]\naddr = \"127.0.0.1:{new_port}\"\n\n[admin]\nlisten = \"127.0.0.1:{admin_port}\"\n\n[[server.listen]]\naddr = \"127.0.0.1:{old_port}\"\n\n{BASE_CFG}"
-    );
-    std::fs::write(&path, both).unwrap();
-    reload_via_channel(&tx).await.expect("reload adds listener");
+    // add a second listener: both serve the same generation. The reload
+    // binds a freshly-picked port — a parallel test can steal it between
+    // pick and bind, so retry on a bind failure.
+    let mut new_port = None;
+    for _ in 0..8 {
+        let candidate = portpicker::pick_unused_port().unwrap();
+        let both = format!(
+            "[[server.listen]]\naddr = \"127.0.0.1:{candidate}\"\n\n[admin]\nlisten = \"127.0.0.1:{admin_port}\"\n\n[[server.listen]]\naddr = \"127.0.0.1:{old_port}\"\n\n{BASE_CFG}"
+        );
+        std::fs::write(&path, both).unwrap();
+        match reload_via_channel(&tx).await {
+            Ok(()) => {
+                new_port = Some(candidate);
+                break;
+            }
+            Err(e) => assert!(e.contains("cannot bind"), "reload adds listener: {e}"),
+        }
+    }
+    let new_port = new_port.expect("reload could not bind a second listener");
 
     // both ports serve the new generation
     for port in [old_port, new_port] {
@@ -211,18 +256,15 @@ async fn reload_picks_up_path_deny_list_edits() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("verd.toml");
     let list = dir.path().join("bad-requests.txt");
-    let port = portpicker::pick_unused_port().unwrap();
-    let admin_port = portpicker::pick_unused_port().unwrap();
     // the config names the list once; editing the file alone must move
     // the deny set on reload (the file joins the --watch trigger set)
-    write_cfg(
-        &path,
-        port,
-        admin_port,
-        "[[site]]\ndefault = true\ntls = \"off\"\nrespond = \"ok\\n\"\npath_deny = { file = \"bad-requests.txt\" }\n",
-    );
     std::fs::write(&list, "/.env\n").unwrap();
-    let (base, _admin, _shared, tx, sd) = start(&path).await;
+    let (base, _admin, _shared, tx, sd, _port, _admin_port) = start(
+        &path,
+        "",
+        "[[site]]\ndefault = true\ntls = \"off\"\nrespond = \"ok\\n\"\npath_deny = { file = \"bad-requests.txt\" }\n",
+    )
+    .await;
     // a fresh connection per request — generations resolve per conn, so
     // a pooled keep-alive would keep serving the pre-reload runtime
     let status = |p: &str| {
@@ -258,10 +300,7 @@ async fn reload_picks_up_path_deny_list_edits() {
 async fn reload_invalid_config_keeps_old_generation() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("verd.toml");
-    let port = portpicker::pick_unused_port().unwrap();
-    let admin_port = portpicker::pick_unused_port().unwrap();
-    write_cfg(&path, port, admin_port, BASE_CFG);
-    let (base, _admin, shared, tx, sd) = start(&path).await;
+    let (base, _admin, shared, tx, sd, _port, _admin_port) = start(&path, "", BASE_CFG).await;
     let gen0 = shared.load();
 
     std::fs::write(&path, "this is not toml [[[").unwrap();
@@ -278,12 +317,8 @@ async fn reload_invalid_config_keeps_old_generation() {
 async fn admin_endpoints_config_upstreams_purge_reload() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("verd.toml");
-    let port = portpicker::pick_unused_port().unwrap();
-    let admin_port = portpicker::pick_unused_port().unwrap();
-    write_cfg_ex(
+    let (base, admin, _shared, tx, sd, port, admin_port) = start(
         &path,
-        port,
-        admin_port,
         r#"token = "s3cret-admin-token""#,
         r#"
 [[site]]
@@ -304,8 +339,8 @@ proxy = { upstream = "app" }
 [cache.main]
 tier = "ram"
 "#,
-    );
-    let (base, admin, _shared, tx, sd) = start(&path).await;
+    )
+    .await;
     let client = reqwest::Client::new();
     let auth = || {
         client
