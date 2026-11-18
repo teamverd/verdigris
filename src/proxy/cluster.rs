@@ -184,6 +184,21 @@ struct PooledH1 {
     since: Instant,
 }
 
+/// Cap on resolver-side caching of negative answers (NXDOMAIN/NODATA).
+/// Hickory caches negatives for the responder's SOA TTL — unbounded, up
+/// to a day — so a cacheable negative seen while records are absent
+/// would keep an evicted upstream out of rotation long after the records
+/// return. Two seconds matches the cadence `dns_failed` uses for
+/// in-grace retries.
+const NEGATIVE_MAX_TTL: Duration = Duration::from_secs(2);
+
+/// Resolver options for upstream re-resolution: bound negative caching
+/// so record changes propagate at the re-resolution cadence, not the
+/// authoritative SOA TTL.
+fn tune_resolver_options(opts: &mut hickory_resolver::config::ResolverOpts) {
+    opts.negative_max_ttl = Some(NEGATIVE_MAX_TTL);
+}
+
 /// DNS cache state for hostname members.
 #[derive(Default)]
 struct DnsState {
@@ -811,9 +826,10 @@ impl Cluster {
     fn resolver(&self) -> Result<&hickory_resolver::TokioResolver, UpError> {
         self.resolver
             .get_or_init(|| {
-                hickory_resolver::TokioResolver::builder_tokio()
-                    .and_then(|b| b.build())
-                    .map_err(|_| UpError::Resolve)
+                let mut builder = hickory_resolver::TokioResolver::builder_tokio()
+                    .map_err(|_| UpError::Resolve)?;
+                tune_resolver_options(builder.options_mut());
+                builder.build().map_err(|_| UpError::Resolve)
             })
             .as_ref()
             .map_err(|e| e.clone())
@@ -1526,6 +1542,146 @@ mod tests {
             Duration::from_secs(60),
         ));
         none.spawn_probes(shutdown.clone());
+    }
+
+    /// Fake DNS server: UDP, answers `app.test` A queries with
+    /// 10.66.0.1 while `mode` is false; when true, replies NXDOMAIN —
+    /// with an SOA authority record when `with_soa` is set, mirroring
+    /// forwarded negative responses.
+    async fn fake_dns(with_soa: bool) -> (SocketAddr, Arc<std::sync::atomic::AtomicBool>) {
+        use std::sync::atomic::AtomicBool;
+        let mode = Arc::new(AtomicBool::new(false));
+        let sock = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let addr = sock.local_addr().unwrap();
+        let mode2 = mode.clone();
+        tokio::spawn(async move {
+            let mut buf = [0u8; 512];
+            while let Ok((n, peer)) = sock.recv_from(&mut buf).await {
+                let q = &buf[..n];
+                if q.len() < 17 {
+                    continue;
+                }
+                let mut i = 12;
+                while q[i] != 0 {
+                    i += 1 + q[i] as usize;
+                }
+                let qend = i + 5;
+                let nx = mode2.load(Ordering::Relaxed);
+                let soa = nx && with_soa;
+                let mut r = Vec::with_capacity(64);
+                r.extend_from_slice(&q[..2]); // id
+                r.extend_from_slice(if nx { &[0x81, 0x83] } else { &[0x81, 0x80] });
+                r.extend_from_slice(&[0, 1]); // qd
+                r.extend_from_slice(&[0, u8::from(!nx)]); // an
+                r.extend_from_slice(&[0, u8::from(soa)]); // ns
+                r.extend_from_slice(&[0, 0]); // ar
+                r.extend_from_slice(&q[12..qend]); // question
+                if soa {
+                    // authority SOA: negative_ttl = 3600
+                    r.extend_from_slice(&[0xC0, 0x0C, 0, 6, 0, 1]);
+                    r.extend_from_slice(&3600u32.to_be_bytes());
+                    r.extend_from_slice(&22u16.to_be_bytes());
+                    r.extend_from_slice(&[0, 0]); // mname + rname (root)
+                    for v in [1u32, 1800, 900, 604800, 3600] {
+                        r.extend_from_slice(&v.to_be_bytes());
+                    }
+                } else if !nx {
+                    // answer A 10.66.0.1, ttl 0 so every call re-resolves
+                    r.extend_from_slice(&[0xC0, 0x0C, 0, 1, 0, 1]);
+                    r.extend_from_slice(&0u32.to_be_bytes());
+                    r.extend_from_slice(&4u16.to_be_bytes());
+                    r.extend_from_slice(&[10, 66, 0, 1]);
+                }
+                let _ = sock.send_to(&r, peer).await;
+            }
+        });
+        (addr, mode)
+    }
+
+    /// Cluster whose resolver points at `dns_addr`, with a short grace.
+    async fn dns_test_cluster(dns_addr: SocketAddr) -> Cluster {
+        let mut conn = hickory_resolver::config::ConnectionConfig::udp();
+        conn.port = dns_addr.port();
+        let mut builder = hickory_resolver::Resolver::builder_with_config(
+            hickory_resolver::config::ResolverConfig::from_name_servers(vec![
+                hickory_resolver::config::NameServerConfig::new(dns_addr.ip(), true, vec![conn]),
+            ]),
+            hickory_resolver::net::runtime::TokioRuntimeProvider::default(),
+        );
+        tune_resolver_options(builder.options_mut());
+        let resolver = builder.build().unwrap();
+        let c = cfg::UpstreamConfig {
+            servers: vec!["http://app.test:80".into()],
+            dns: cfg::UpstreamDns {
+                grace: Duration::from_millis(50),
+            },
+            ..Default::default()
+        };
+        let cluster = Cluster::build("t", &c).unwrap();
+        let _ = cluster.resolver.set(Ok(resolver));
+        cluster
+    }
+
+    /// Drive the member through record-loss past the grace window until
+    /// `addrs` reports eviction, flip the record back on, then require
+    /// re-resolution within `rejoin_deadline` (the cached negative may
+    /// linger up to `negative_max_ttl`).
+    async fn evict_then_restore(
+        cluster: &Cluster,
+        mode: &std::sync::atomic::AtomicBool,
+        rejoin_deadline: Duration,
+    ) {
+        let member = &cluster.members[0];
+        assert_eq!(
+            member.addrs(cluster).await.unwrap(),
+            vec!["10.66.0.1:80".parse().unwrap()]
+        );
+        mode.store(true, Ordering::Relaxed);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            if member.addrs(cluster).await.is_err() {
+                break;
+            }
+            assert!(Instant::now() < deadline, "member never evicted");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        mode.store(false, Ordering::Relaxed);
+        let deadline = Instant::now() + rejoin_deadline;
+        loop {
+            match member.addrs(cluster).await {
+                Ok(addrs) => {
+                    assert_eq!(addrs, vec!["10.66.0.1:80".parse().unwrap()]);
+                    return;
+                }
+                Err(_) => {
+                    assert!(
+                        Instant::now() < deadline,
+                        "upstream did not rejoin after records returned"
+                    );
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+            }
+        }
+    }
+
+    /// NXDOMAIN without SOA is not cacheable (RFC 2308) — the member must
+    /// rejoin as soon as the record returns.
+    #[tokio::test]
+    async fn dns_recovers_after_eviction_nxdomain_no_soa() {
+        let (dns_addr, mode) = fake_dns(false).await;
+        let cluster = dns_test_cluster(dns_addr).await;
+        evict_then_restore(&cluster, &mode, Duration::from_millis(200)).await;
+    }
+
+    /// NXDOMAIN carrying an SOA is negatively cached by the resolver —
+    /// bounded by `negative_max_ttl`, the member must still rejoin when
+    /// the record returns instead of serving 502s for the SOA's TTL.
+    #[tokio::test]
+    async fn dns_recovers_after_eviction_nxdomain_with_soa() {
+        let (dns_addr, mode) = fake_dns(true).await;
+        let cluster = dns_test_cluster(dns_addr).await;
+        // rejoin within ~negative_max_ttl (2s) + slack, not the SOA's 3600s
+        evict_then_restore(&cluster, &mode, Duration::from_secs(10)).await;
     }
 
     #[tokio::test]
