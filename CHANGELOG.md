@@ -11,6 +11,8 @@ workflow publishes the matching section as the GitHub release notes.
 
 ## [Unreleased]
 
+## [1.7.0] - 2026-11-18
+
 ### Fixed
 
 - **`match.headers.host` compares the canonical host** — condition and
@@ -1115,7 +1117,8 @@ reverse proxy with load balancing and retries, response caching
 (RAM/disk/hybrid), compression, rate limiting, CORS, security headers,
 admin API with atomic reloads, Prometheus metrics.
 
-[Unreleased]: https://github.com/teamverd/verdigris/compare/v1.6.0...HEAD
+[Unreleased]: https://github.com/teamverd/verdigris/compare/v1.7.0...HEAD
+[1.7.0]: https://github.com/teamverd/verdigris/compare/v1.6.0...v1.7.0
 [1.6.0]: https://github.com/teamverd/verdigris/compare/v1.5.0...v1.6.0
 [1.5.0]: https://github.com/teamverd/verdigris/compare/v1.4.0...v1.5.0
 [1.4.0]: https://github.com/teamverd/verdigris/compare/v1.3.0...v1.4.0
