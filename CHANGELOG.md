@@ -11,6 +11,14 @@ workflow publishes the matching section as the GitHub release notes.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`match.headers.host` compares the canonical host** — condition and
+  request values both get the same normalization `site.hosts` gets
+  (lowercased, port and trailing dot stripped), so a request sent as
+  `Host: EXAMPLE.com:8443` no longer misses a `host = "example.com"`
+  route; `re:` patterns match the normalized host too
+
 ## [1.6.0] - 2026-11-18
 
 ## [1.5.0] - 2026-11-17

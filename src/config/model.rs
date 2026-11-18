@@ -2315,6 +2315,9 @@ pub struct MatchConditions {
     /// Required request headers. Values match exactly, or as regex when
     /// prefixed with `re:`. A value of `""` requires only presence —
     /// same rule as `query` (match an empty value with `re:^$`).
+    /// `host` compares the canonical host — lowercased, port and
+    /// trailing dot stripped — the same normalization `site.hosts`
+    /// gets.
     pub headers: BTreeMap<String, String>,
     /// Required query parameters (`key` must equal or regex-match the value).
     /// A value of `""` requires only presence.

@@ -141,8 +141,11 @@ query = { "debug" = "1" }
 
 An empty-string value means *presence-only* — `"x-internal" = ""`
 matches any request that carries the header (to match a literally
-empty value, use `re:^$`). Conditions only *filter* a route; they
-never change which route wins on path specificity.
+empty value, use `re:^$`). A `host` condition compares the canonical
+host — lowercased, port and trailing dot stripped, the same
+normalization `site.hosts` gets — so `host = "example.com"` also
+matches `Host: EXAMPLE.com:8443`. Conditions only *filter* a route;
+they never change which route wins on path specificity.
 
 ## Placeholders
 

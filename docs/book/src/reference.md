@@ -740,7 +740,7 @@ not affect path precedence.
 
 | field | type | default | description |
 |---|---|---|---|
-| `headers` | object | `{}` | Required request headers. Values match exactly, or as regex when prefixed with `re:`. A value of `""` requires only presence — same rule as `query` (match an empty value with `re:^$`). |
+| `headers` | object | `{}` | Required request headers. Values match exactly, or as regex when prefixed with `re:`. A value of `""` requires only presence — same rule as `query` (match an empty value with `re:^$`). `host` compares the canonical host — lowercased, port and trailing dot stripped — the same normalization `site.hosts` gets. |
 | `methods` | [string] | `[]` | HTTP methods, e.g. `["GET", "HEAD"]`. |
 | `query` | object | `{}` | Required query parameters (`key` must equal or regex-match the value). A value of `""` requires only presence. |
 
