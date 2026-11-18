@@ -23,6 +23,14 @@ workflow publishes the matching section as the GitHub release notes.
   redirects clients to the reachable port instead of the bound one;
   unset entries keep advertising `addr`'s port
 
+### Fixed
+
+- **Hostname upstreams rejoin rotation once their DNS records return** —
+  the shared resolver cached negative answers (NXDOMAIN/NODATA) for the
+  responder's SOA TTL, up to a day, so an upstream evicted past
+  `upstream.*.dns.grace` kept serving 502s after its records came back;
+  negative answers are now cached for at most 2s
+
 ## [1.4.0] - 2026-11-17
 
 ### Changed

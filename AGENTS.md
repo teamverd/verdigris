@@ -1,5 +1,10 @@
 # Working agreements
 
+## Change review
+
+Every fix or code change must answer: would this introduce any security
+or performance issues? Call the answer out explicitly with the change.
+
 ## Changelog
 
 `CHANGELOG.md` must stay current with user-visible changes. When a
