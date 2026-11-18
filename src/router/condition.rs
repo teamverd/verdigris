@@ -8,6 +8,7 @@ use http::{HeaderName, Method};
 use regex::Regex;
 
 use crate::config::model::MatchConditions;
+use crate::router::normalize_host;
 
 /// A value pattern: exact string or `re:`-prefixed regex.
 #[derive(Debug)]
@@ -63,10 +64,21 @@ impl Conditions {
                 })
             })
             .collect::<Result<_, _>>()?;
-        let headers = compile_named(&m.headers, |name| {
+        let mut headers = compile_named(&m.headers, |name| {
             HeaderName::from_bytes(name.as_bytes())
                 .map_err(|_| format!("invalid header name {name:?} — e.g. \"x-custom-header\""))
         })?;
+        // `host` compares the canonical host — the same normalization
+        // site selection applies (lowercased, port and trailing dot
+        // stripped) — so exact values are stored normalized and `re:`
+        // patterns see the normalized request host.
+        for (name, pat) in &mut headers {
+            if *name == http::header::HOST
+                && let Pattern::Exact(s) = pat
+            {
+                *s = normalize_host(s);
+            }
+        }
         let query = compile_named(&m.query, |name| Ok(name.clone()))?;
         Ok(Self {
             methods,
@@ -102,9 +114,16 @@ impl Conditions {
                 }
                 continue;
             }
-            match value {
-                Some(v) if pat.is_match(v) => {}
-                _ => return false,
+            let matched = match value {
+                // host compares the canonical host — same normalization
+                // as site routing (lowercase, port/trailing dot
+                // stripped); the pattern was normalized at build time
+                Some(v) if *name == http::header::HOST => pat.is_match(&normalize_host(v)),
+                Some(v) => pat.is_match(v),
+                None => false,
+            };
+            if !matched {
+                return false;
             }
         }
         if !self.query.is_empty() {
@@ -266,6 +285,45 @@ mod tests {
             ..Default::default()
         };
         assert!(Conditions::build(&m).unwrap().matches(&h2_style));
+    }
+
+    #[test]
+    fn host_condition_matches_normalized_host() {
+        // same canonicalization as site selection — case, port and a
+        // trailing dot are ignored, for exact and `re:` values alike
+        let m = MatchConditions {
+            headers: [("host".into(), "EXAMPLE.com".into())]
+                .into_iter()
+                .collect(),
+            ..Default::default()
+        };
+        let c = Conditions::build(&m).unwrap();
+        let mk = |host: &str| {
+            http::Request::builder()
+                .method("GET")
+                .uri("/p")
+                .header("host", host)
+                .body(crate::body::empty())
+                .unwrap()
+                .into_parts()
+                .0
+        };
+        assert!(c.matches(&mk("example.com")));
+        assert!(c.matches(&mk("Example.COM")));
+        assert!(c.matches(&mk("example.com:8443")));
+        assert!(c.matches(&mk("example.com.")));
+        assert!(!c.matches(&mk("notexample.com")));
+
+        // `re:` sees the same normalized host — no port in view
+        let m = MatchConditions {
+            headers: [("host".into(), "re:^example\\.com$".into())]
+                .into_iter()
+                .collect(),
+            ..Default::default()
+        };
+        let c = Conditions::build(&m).unwrap();
+        assert!(c.matches(&mk("EXAMPLE.com:443")));
+        assert!(!c.matches(&mk("example.com.evil")));
     }
 
     #[test]
