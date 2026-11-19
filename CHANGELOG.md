@@ -38,10 +38,9 @@ workflow publishes the matching section as the GitHub release notes.
 
 - **`Accept-Encoding` q-values clamp to 0–1** — a `q` parameter above
   1 (e.g. `br;q=9`) previously escaped the function's documented
-  0–1000 scaled range via float→`u16` saturation; Kani's
-  `encoding_quality_in_range` proof flagged it. Out-of-range q-values
-  now saturate at the top preference instead of wrapping around
-  halfway
+  0–1000 scaled range via float→`u16` saturation (flagged while
+  evaluating the Kani verifier). Out-of-range q-values now saturate at
+  the top preference instead of smearing into arbitrary u16 space
 - **`h3://` upstream URLs validate** — `verd validate` rejected
   `h3://` members as an unknown scheme even though the proxy accepts
   them; upstream URL validation now accepts `h3` alongside `http`,
@@ -49,13 +48,11 @@ workflow publishes the matching section as the GitHub release notes.
 
 ### Build & CI
 
-- **Kani model-checking gate** — `#[kani::proof]` harnesses
-  (`.github/workflows/kani.yml`, `cargo kani` locally) prove bounded
-  invariants exhaustively on attacker-controlled parsers:
-  `normalize_path` output is always rooted with plain segments only,
-  and `parse_range` always returns an in-bounds window (`start <= end
-  < size`) for every header string and file size. Harnesses compile
-  only under `cfg(kani)` — zero cost to normal builds
+- **Property tests for path/range/q-value invariants** — proptest
+  harnesses cover `normalize_path` (output is rooted with plain
+  segments only, never expands), `parse_range` (always returns an
+  in-bounds window or nothing) and `encoding_quality` (stays in its
+  documented 0–1000 range) on attacker-shaped inputs
 
 ## [1.7.0] - 2026-11-18
 

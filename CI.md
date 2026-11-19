@@ -59,17 +59,6 @@ scanning; fails on fixable HIGH/CRITICAL) and runs informational
 `security-and-quality` query suite on PRs, pushes, and weekly
 (Wednesday 04:15 UTC). SARIF uploads feed the Security tab.
 
-### `kani.yml` — model-checked invariants
-
-`cargo kani` via `model-checking/kani-github-action` (Kani version
-pinned) proves `#[cfg(kani)]` harnesses on attacker-controlled pure
-functions, exhaustively within input bounds — today `normalize_path`
-(output is rooted, plain segments only, never expands),
-`parse_range` (`start <= end < size` for every header and file size)
-and `encoding_quality` (stays in its documented 0–1000 range).
-Plain builds strip the harnesses; `cargo install kani-verifier &&
-cargo kani setup && cargo kani` reproduces locally.
-
 ### `cflite_pr.yml` — PR fuzz smoke
 
 ClusterFuzzLite builds the fuzz harnesses (~7 min, cached) and runs a
@@ -169,6 +158,19 @@ tag push fires `release.yml`.
   compare remains the candidate if that's ever needed.
 - **Sanitizers/Miri on the main crate** — one sanctioned `unsafe`
   (mmap); fuzzers already run under ASan/UBSan.
+- **Kani model checking** — evaluated 2026-11: `#[kani::proof]`
+  harnesses verify real code but every security-relevant target here
+  is `&str`-based, and std `str`/`String`/`memchr` machinery makes
+  CBMC's solver cost minutes-to-never per harness even on *concrete*
+  inputs (measured: empty proof = 0.02s, `parent_prefix("/a/b/c")` =
+  44s with `#[kani::unwind(8)]`, `normalize_path`/`parse_range`
+  harnesses > 15–20 min unsolved at 19–41 byte inputs — a documented
+  Kani limitation the verify-rust-std effort also hits). The pilot did
+  catch one real bug (`encoding_quality` escaping its documented
+  0–1000 range), whose invariants now live as proptests. Revisit for
+  scalar-only modules (no `&str`/`String`/`Instant`/`HashMap`) or when
+  `-Z synthesize-loop-contracts` ships in a release bundle (missing
+  `goto-synthesizer` in 0.68).
 - **`cargo vet`, `loom`, `minimal-versions`, Semgrep, hadolint, taplo**
   — real gains but high maintenance or marginal over existing coverage.
 

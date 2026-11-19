@@ -158,11 +158,6 @@ assert_cmd = "2"
 portpicker = "0.1"
 divan = { version = "6", package = "codspeed-divan-compat" }
 
-# `cargo kani` compiles #[cfg(kani)] proof harnesses; register the cfg
-# so plain builds don't trip `unexpected_cfgs`.
-[lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ["cfg(kani)"] }
-
 [profile.release]
 lto = "thin"
 codegen-units = 1

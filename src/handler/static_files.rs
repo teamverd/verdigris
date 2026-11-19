@@ -820,6 +820,11 @@ mod tests {
         assert_eq!(encoding_quality("gzip;q=0", "gzip"), 0);
         assert_eq!(encoding_quality("*", "br"), 999);
         assert_eq!(encoding_quality("identity", "br"), 0);
+        // out-of-range q clamps to the documented 0–1000 range instead
+        // of smearing through the float→u16 cast
+        assert_eq!(encoding_quality("br;q=9", "br"), 1000);
+        assert_eq!(encoding_quality("br;q=999", "br"), 1000);
+        assert_eq!(encoding_quality("br;q=-1", "br"), 0);
     }
 
     #[test]
@@ -1157,65 +1162,54 @@ mod handler_tests {
         let r = s.handle(req(Method::GET, "/s.sock"), &ctx("/s.sock")).await;
         assert_eq!(r.status(), 404);
     }
-}
 
-/// `cargo kani` model-checking: bounded-exhaustive proofs on the two
-/// attacker-controlled parsers in this module — `Range` (the
-/// CVE-2017-7529 class: nginx's range-math overflow leaked memory)
-/// and `Accept-Encoding` quality values.
-#[cfg(kani)]
-mod proofs {
-    use super::*;
-
-    /// A symbolic header value of at most `N` chars over `alphabet`,
-    /// so the grammar's tokens are actually reachable (fully symbolic
-    /// bytes would almost never spell `bytes=`). Kept as a fixed array
-    /// — a `String`/`collect` would give the solver an unbounded
-    /// symbolic length and never finish.
-    fn any_text<const N: usize>(alphabet: &[u8]) -> [u8; N] {
-        let raw: [u8; N] = kani::any();
-        raw.map(|b| alphabet[(b % alphabet.len() as u8) as usize])
-    }
-
-    /// A `One` result is always a satisfiable in-bounds window —
-    /// `start <= end < size` — for *every* well-formed header and
-    /// file size, including `size == 0` and `u64::MAX` endpoints.
-    /// Endpoints enter as symbolic *text* (all three grammars: `a-b`,
-    /// `a-`, `-N`) — only well-formed numbers can yield `One`, so
-    /// malformed-input paths that return `Invalid`/`Multi` are skipped
-    /// without losing coverage of what this property constrains.
-    #[kani::proof]
-    fn parsed_range_is_in_bounds() {
-        let a: u64 = kani::any();
-        let b: u64 = kani::any();
-        let size: u64 = kani::any();
-        let header = match kani::any::<u8>() % 3 {
-            0 => format!("bytes={a}-{b}"),
-            1 => format!("bytes={a}-"),
-            _ => format!("bytes=-{b}"),
-        };
-        if let RangeResult::One(start, end) = parse_range(&header, size) {
-            assert!(start <= end);
-            assert!(end < size);
+    proptest::proptest! {
+        /// `RangeResult::One` is always a satisfiable in-bounds window
+        /// — `start <= end < size` — for every well-formed header and
+        /// file size (incl. `size == 0` and `u64::MAX` endpoints). This
+        /// is the CVE-2017-7529 class: nginx's range-math overflow
+        /// leaked memory contents.
+        #[test]
+        fn parsed_range_is_in_bounds(
+            a in proptest::prelude::any::<u64>(),
+            b in proptest::prelude::any::<u64>(),
+            size in proptest::prelude::any::<u64>(),
+            form in 0u8..3,
+        ) {
+            let header = match form {
+                0 => format!("bytes={a}-{b}"),
+                1 => format!("bytes={a}-"),
+                _ => format!("bytes=-{b}"),
+            };
+            if let RangeResult::One(start, end) = parse_range(&header, size) {
+                assert!(start <= end);
+                assert!(end < size);
+            }
         }
-    }
 
-    /// Stubs out the real `f32` parser: `dec2flt` on symbolic text is
-    /// the dominant solver cost (minutes). The property constrains
-    /// the result for *any* parsed value — which the stub covers more
-    /// broadly, including NaN and infinities.
-    fn any_parsed_f32(_s: &str) -> Result<f32, std::num::ParseFloatError> {
-        Ok(kani::any())
-    }
+        /// Arbitrary headers must never panic, and any `One` still
+        /// lands in bounds (malformed input resolves to
+        /// `Invalid`/`Multi`).
+        #[test]
+        fn parse_range_never_panics(
+            header in ".*",
+            size in proptest::prelude::any::<u64>(),
+        ) {
+            if let RangeResult::One(start, end) = parse_range(&header, size) {
+                assert!(start <= end);
+                assert!(end < size);
+            }
+        }
 
-    /// The documented contract is a quality in 0–1000 (RFC 9110
-    /// qvalues scaled by 1000); an out-of-range `q=9` must clamp, not
-    /// wrap through the u16 cast.
-    #[kani::proof]
-    #[kani::stub(f32::from_str, any_parsed_f32)]
-    fn encoding_quality_in_range() {
-        let bytes = any_text::<10>(b"gzip,br;q=01.* ");
-        let accept = std::str::from_utf8(&bytes).unwrap();
-        assert!(encoding_quality(accept, "br") <= 1000);
+        /// The documented contract is a quality in 0–1000 (RFC 9110
+        /// qvalues scaled by 1000); out-of-range `q` must clamp, not
+        /// wrap through the u16 cast.
+        #[test]
+        fn encoding_quality_in_range(
+            accept in "[a-z,;=\\.q* ]{0,24}",
+            enc in proptest::sample::select(&["br", "gzip", "*", "zz"]),
+        ) {
+            assert!(encoding_quality(&accept, enc) <= 1000);
+        }
     }
 }
