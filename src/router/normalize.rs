@@ -315,6 +315,18 @@ mod proofs {
         assert_eq!(normalize_path("/a/../b").unwrap(), "/b");
     }
 
+    /// Second control: nothing at all — measures crate+CBMC baseline.
+    #[kani::proof]
+    fn sanity_baseline() {}
+
+    /// Third control: `parent_prefix` is `&str`→`&str` with no
+    /// allocation — if it's fast while `normalize_path` is not, the
+    /// cost is the percent-decode/`Cow`/`Vec`/`join` stack, not `&str`.
+    #[kani::proof]
+    fn sanity_parent_prefix() {
+        assert_eq!(parent_prefix("/a/b/c"), "/a/b");
+    }
+
     /// A symbolic path of `N` segments over the shapes normalization
     /// must classify: empty (dup slashes), dots, encoded dots/slashes,
     /// bad encodings (NUL/control/UTF-8) and plain names. Symbolic at

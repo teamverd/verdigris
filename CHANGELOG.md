@@ -42,6 +42,10 @@ workflow publishes the matching section as the GitHub release notes.
   `encoding_quality_in_range` proof flagged it. Out-of-range q-values
   now saturate at the top preference instead of wrapping around
   halfway
+- **`h3://` upstream URLs validate** — `verd validate` rejected
+  `h3://` members as an unknown scheme even though the proxy accepts
+  them; upstream URL validation now accepts `h3` alongside `http`,
+  `https`, and `h2c`
 
 ### Build & CI
 

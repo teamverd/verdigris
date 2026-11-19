@@ -2071,7 +2071,7 @@ fn check_proxy_retries(ctx: &mut Ctx, path: &str, retries: &crate::config::model
 /// doesn't produce ("http://" is just "empty string" to it).
 fn check_upstream_url(ctx: &mut Ctx, path: &str, url: &str) {
     match url.split_once("://") {
-        Some(("http" | "https" | "h2c", rest)) => {
+        Some(("http" | "https" | "h2c" | "h3", rest)) => {
             if rest
                 .split(['/', '?', '@'])
                 .next()
@@ -2089,7 +2089,7 @@ fn check_upstream_url(ctx: &mut Ctx, path: &str, url: &str) {
             ctx.error(
                 path.to_string(),
                 format!(
-                    "upstream URL {url:?} must have scheme http, https, or h2c — e.g. \"http://127.0.0.1:9000\""
+                    "upstream URL {url:?} must have scheme http, https, h2c, or h3 — e.g. \"http://127.0.0.1:9000\""
                 ),
             );
             return;

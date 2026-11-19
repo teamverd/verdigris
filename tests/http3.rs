@@ -253,14 +253,15 @@ async fn h3_get_alt_svc_and_pipeline_parity() {
         "pipeline headers must flow over h3"
     );
 
-    // the TCP side of the same listener advertises Alt-Svc
+    // the TCP side of the same listener advertises Alt-Svc — pin DNS
+    // to the cert's hostname so the chain + SAN verify for real
     let https = reqwest::Client::builder()
-        .danger_accept_invalid_certs(true)
+        .add_root_certificate(reqwest::Certificate::from_pem(cert.as_bytes()).unwrap())
+        .resolve("example.test", format!("127.0.0.1:{port}").parse().unwrap())
         .build()
         .unwrap();
     let resp = https
-        .get(format!("https://127.0.0.1:{port}/"))
-        .header("host", "example.test")
+        .get(format!("https://example.test:{port}/"))
         .send()
         .await
         .unwrap();
@@ -361,14 +362,15 @@ async fn h3_upstream_proxying() {
         .replace("{backend}", &bport.to_string());
     let (fport, _frt, fsd) = start(&front_cfg, None).await;
 
+    // pin "front.test" to the listener so the cert's SAN verifies
     let https = reqwest::Client::builder()
-        .danger_accept_invalid_certs(true)
+        .add_root_certificate(reqwest::Certificate::from_pem(fcert.as_bytes()).unwrap())
+        .resolve("front.test", format!("127.0.0.1:{fport}").parse().unwrap())
         .build()
         .unwrap();
     // GET over the h3 upstream
     let resp = https
-        .get(format!("https://127.0.0.1:{fport}/"))
-        .header("host", "front.test")
+        .get(format!("https://front.test:{fport}/"))
         .send()
         .await
         .unwrap();
@@ -378,8 +380,7 @@ async fn h3_upstream_proxying() {
     // POST a body through the same upstream path — two streams on the
     // one shared QUIC conn
     let resp = https
-        .post(format!("https://127.0.0.1:{fport}/echo"))
-        .header("host", "front.test")
+        .post(format!("https://front.test:{fport}/echo"))
         .body("hi h3 upstream")
         .send()
         .await

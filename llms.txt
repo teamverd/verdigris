@@ -194,6 +194,7 @@ cache = { store = "main", ttl = "5m", stale_if_error = "5m" }
 - [Static file serving](docs/book/src/static.md)
 - [Reverse proxy & load balancing](docs/book/src/proxy.md)
 - [TLS, ACME & redirects](docs/book/src/tls.md)
+- [HTTP/3 (QUIC)](docs/book/src/http3.md)
 - [Middleware](docs/book/src/middleware.md)
 - [Caching](docs/book/src/caching.md)
 - [Observability](docs/book/src/observability.md)
