@@ -19,7 +19,7 @@ Root configuration for a verdigris instance.
 | `include` | [string] |  | Additional files or directories of `*.toml` fragments merged into this configuration, relative to the directory containing this file. Fragment files are loaded in sorted order; scalar conflicts between fragments and the main file are errors. A glob pattern matching no files is a no-op; a missing file or directory is an error. |
 | `limits` | Limits | `{"body_bytes": "10MiB", "header_bytes": "16KiB"}` | Default request limits; individual routes may override. |
 | `log` | LogConfig | `{"access": {"enabled": true, "filter": null, "format": "json", "output": "stdout", "sample": 1.0}, "format": "json", "level": "info", "output": "stderr"}` | Server and access logging. |
-| `server` | ServerConfig | `{"graceful_timeout": "30s", "listen": [{"addr": "0.0.0.0:80", "external_port": null, "tls": false}], "max_connections": 65536, "max_connections_per_ip": 256, "security": {"content_type_options": true, "cross_domain_policy": "", "csp": null, "enabled": true, "frame_options": "DENY", "hsts": true, "hsts_max_age": "180d", "hsts_subdomains": false, "referrer_policy": "strict-origin-when-cross-origin"}, "server_header": "verd", "trusted_proxies": []}` | Server-wide settings: listeners, connection limits, shutdown. |
+| `server` | ServerConfig | `{"graceful_timeout": "30s", "http3": false, "listen": [{"addr": "0.0.0.0:80", "external_port": null, "tls": false}], "max_connections": 65536, "max_connections_per_ip": 256, "security": {"content_type_options": true, "cross_domain_policy": "", "csp": null, "enabled": true, "frame_options": "DENY", "hsts": true, "hsts_max_age": "180d", "hsts_subdomains": false, "referrer_policy": "strict-origin-when-cross-origin"}, "server_header": "verd", "trusted_proxies": []}` | Server-wide settings: listeners, connection limits, shutdown. |
 | `site` | [SiteConfig] | `[]` | Virtual sites. Requests are routed by the Host header. |
 | `timeouts` | Timeouts | `{"body_read": "1m", "header_read": "20s", "idle": "75s", "request_deadline": "5m", "send": "1m", "tls_handshake": "10s"}` | Default timeouts; individual routes may override. |
 | `upstream` | object | `{}` | Named upstream clusters for reverse proxy routes. Each entry is a `[upstream.<name>]` table or, for the common case, just a server URL (`upstream.app = "http://a"`), a URL list, or a `{ url, weight, backup }` entry — shorthand for `servers`. |
@@ -31,6 +31,7 @@ Server-wide settings.
 | field | type | default | description |
 |---|---|---|---|
 | `graceful_timeout` | string | `"30s"` | Time to wait for in-flight requests during shutdown or reload before connections are closed. |
+| `http3` | boolean | `false` | HTTP/3 (QUIC/UDP) on every TLS listener: each `tls = true` entry also binds a UDP socket on the same address. Per-listener `http3` overrides this for individual entries. HTTP/3 always carries TLS — plaintext listeners never get QUIC. Off by default. |
 | `listen` | [ListenAddrSchema] | `[{"addr": "0.0.0.0:80", "external_port": null, "tls": false}]` | Addresses to listen on. Defaults to a single plaintext listener on port 80. Entries are either `"ip:port"` strings or `{ addr = "ip:port", tls = true }` tables to terminate TLS; `external_port` on a TLS entry overrides the port advertised in HTTP→HTTPS redirects (e.g. behind NAT or `-p 443:8443`). |
 | `max_connections` | integer | `65536` | Maximum concurrent connections across all listeners. |
 | `max_connections_per_ip` | integer | `256` | Maximum concurrent connections per client IP address. |
@@ -275,7 +276,7 @@ A named cluster of upstream servers.
 | `health` | HealthCheckSchema | `{"active": null, "passive": null}` | Health checking; `health = "/healthz"` enables active probes on that path (same as `health.active = "/healthz"`). |
 | `lb` | LoadBalancing | `"round_robin"` | Load balancing algorithm. |
 | `max_connections` | integer | `1024` | Max concurrent connections to a single upstream. |
-| `servers` | [UpstreamServerSchema] | `[]` | Server entries: a URL string or `{ url, weight, backup }` table — `http://host:port`, `https://host:port`, or `h2c://` for cleartext HTTP/2 prior knowledge (typical for gRPC backends). |
+| `servers` | [UpstreamServerSchema] | `[]` | Server entries: a URL string or `{ url, weight, backup }` table — `http://host:port`, `https://host:port`, `h2c://` for cleartext HTTP/2 prior knowledge (typical for gRPC backends), or `h3://` for HTTP/3 over QUIC (always TLS; one shared QUIC connection multiplexes streams per member). |
 | `timeouts` | UpstreamTimeouts | `{"connect": "5s", "idle": "90s", "response_header": "30s"}` | Per-upstream timeouts. |
 | `tls` | UpstreamTls | `{"ca": null, "sni": null, "verify": true}` | TLS options for `https://` upstreams. |
 | `unavailable` | UnavailableSchema | `{"body": null, "status": 502}` | Response when no upstream in the cluster is healthy — `unavailable = 503` or a table. |
@@ -712,7 +713,7 @@ Schema shape for a `server.listen` entry (`"ip:port"` or
 | form | description |
 |---|---|
 | `string` | `"ip:port"` or `":port"` (all interfaces) — a plaintext listener. |
-| `{ addr, external_port, tls }` | `{ addr = "ip:port", tls = true, external_port = 443 }` — all optional. |
+| `{ addr, external_port, http3, tls }` | `{ addr = "ip:port", tls = true, external_port = 443 }` — all optional. |
 
 ## `LoadBalancing`
 
@@ -982,7 +983,7 @@ single server entry, or a full table.
 | field | type | default | description |
 |---|---|---|---|
 | `backup` | boolean | `false` | `true` marks a standby used only when no primary is healthy. Default false. |
-| `url` | string **required** |  | Server URL: `http://`, `https://`, or `h2c://`. |
+| `url` | string **required** |  | Server URL: `http://`, `https://`, `h2c://`, or `h3://`. |
 | `weight` | integer | `1` | Relative selection weight (≥ 1). Default 1. |
 
 ## `UpstreamServerSchema`

@@ -235,7 +235,8 @@ proxy = ["http://10.0.0.2:8080", "http://10.0.0.3:8080"]
 
 ### V2
 
-- HTTP/3 (QUIC)
+- HTTP/3 (QUIC) — **shipped**: `server.http3`/per-listener QUIC
+  listeners, `h3://` upstreams, RFC 9220 WebSocket tunnels
 - Authorization: RBAC, ABAC, OAuth2/OIDC forward authentication, JWT validation (JWKS)
 - Client-certificate authentication (mTLS): verifying downstream clients and presenting client certificates to upstreams
 - Plugin system: WebAssembly plugins (sandboxed, hot-loadable) for request and response filters

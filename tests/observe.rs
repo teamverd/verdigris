@@ -26,6 +26,7 @@ async fn start(
         addr: format!("127.0.0.1:{port}").parse().unwrap(),
         tls: false,
         external_port: None,
+        http3: None,
     }];
     cfg.admin.listen = vec![format!("127.0.0.1:{admin_port}").parse().unwrap()];
 

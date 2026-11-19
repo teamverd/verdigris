@@ -381,6 +381,18 @@ fn check_listeners(ctx: &mut Ctx, cfg: &Config) {
             ),
             _ => {}
         }
+        if l.http3 == Some(true) && !l.tls {
+            ctx.error(
+                format!("server.listen[{i}].http3"),
+                "http3 requires tls = true — QUIC is always encrypted; set tls or drop http3",
+            );
+        }
+    }
+    if cfg.server.http3 && !cfg.server.listen.iter().any(|l| l.tls) {
+        ctx.warn(
+            "server.http3",
+            "http3 = true but no TLS listener exists — QUIC is unreachable; add tls = true to a listener",
+        );
     }
     if cfg.server.max_connections == 0 {
         ctx.error(
@@ -1949,18 +1961,20 @@ fn check_upstreams(ctx: &mut Ctx, cfg: &Config) {
                 "every server is a backup — no primary receives traffic while any backup is healthy",
             );
         }
-        if !up.tls.verify && up.servers.iter().any(|u| u.url.starts_with("https://")) {
+        let has_tls_member = up
+            .servers
+            .iter()
+            .any(|u| u.url.starts_with("https://") || u.url.starts_with("h3://"));
+        if !up.tls.verify && has_tls_member {
             ctx.warn(
                 format!("{path}.tls.verify"),
                 "tls.verify = false disables upstream certificate verification — traffic to this upstream is MITM-able; prefer a custom ca or sni override",
             );
         }
-        if up.tls != crate::config::model::UpstreamTls::default()
-            && !up.servers.iter().any(|u| u.url.starts_with("https://"))
-        {
+        if up.tls != crate::config::model::UpstreamTls::default() && !has_tls_member {
             ctx.warn(
                 format!("{path}.tls"),
-                "tls settings are ignored — no https:// server in this upstream",
+                "tls settings are ignored — no https:// or h3:// server in this upstream",
             );
         }
         if !up.tls.verify && up.tls.ca.is_some() {
@@ -2914,6 +2928,40 @@ max_connections_per_ip = 100
                 .iter()
                 .all(|d| !d.path.contains("external_port"))
         );
+    }
+
+    #[test]
+    fn listen_http3_checks() {
+        // http3 on a plaintext listener is a hard error — QUIC is
+        // always encrypted
+        let cfg =
+            parse_test_config("[server]\nlisten = [{ addr = \"127.0.0.1:8080\", http3 = true }]");
+        assert!(has_err(
+            &cfg,
+            "server.listen[0].http3",
+            "requires tls = true"
+        ));
+
+        // global http3 with no TLS listener at all warns — nothing can
+        // ever serve QUIC
+        let cfg =
+            parse_test_config("[server]\nhttp3 = true\nlisten = [{ addr = \"127.0.0.1:8080\" }]");
+        assert!(has_warn(&cfg, "server.http3", "no TLS listener"));
+
+        // global on + TLS listener inherits — per-entry false opts out
+        let cfg = parse_test_config(
+            "[server]\nhttp3 = true\nlisten = [{ addr = \"127.0.0.1:8443\", tls = true }, { addr = \"127.0.0.1:8444\", tls = true, http3 = false }]",
+        );
+        assert!(cfg.server.listen[0].http3_enabled(cfg.server.http3));
+        assert!(!cfg.server.listen[1].http3_enabled(cfg.server.http3));
+        assert!(validate(&cfg).iter().all(|d| !d.path.contains("http3")));
+
+        // per-entry http3 alone enables QUIC without the global flag
+        let cfg = parse_test_config(
+            "[server]\nlisten = [{ addr = \"127.0.0.1:8443\", tls = true, http3 = true }]",
+        );
+        assert!(cfg.server.listen[0].http3_enabled(cfg.server.http3));
+        assert!(validate(&cfg).iter().all(|d| !d.path.contains("http3")));
     }
 
     #[test]

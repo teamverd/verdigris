@@ -11,8 +11,25 @@ workflow publishes the matching section as the GitHub release notes.
 
 ## [Unreleased]
 
+### Security
+
+- **Demo stack hardened** — `docker-compose.yml` now sets
+  `security_opt: [no-new-privileges:true]` and `cap_drop: [ALL]` on both
+  services, runs `upstream` read-only as non-root uid 65532, and pins
+  its image by digest; verd only needs unprivileged ports inside the
+  container
+
 ### Added
 
+- **HTTP/3 (QUIC), off by default** — `server.http3` (global) and
+  `http3` inside `server.listen` table entries bind a UDP socket next
+  to the TLS listener; TLS TCP responses advertise it via `Alt-Svc`.
+  `h3://` upstream URLs proxy over QUIC through one shared connection
+  per member, with health probes and `upstream.tls` (`verify`, `ca`,
+  `sni`) support. WebSocket/upgrade requests tunnel over HTTP/3 via
+  RFC 9220 extended CONNECT — translated to/from the classic `Upgrade`
+  wire form for h1/h2 ends, so a classic client can ride an `h3://`
+  upstream and an h3 client can ride a classic one
 - **Project icon** — `icon.svg` now serves as the docs-site favicon
   (`docs/book/theme/`) and appears in the README, the book landing
   page, and generated GitHub release notes
