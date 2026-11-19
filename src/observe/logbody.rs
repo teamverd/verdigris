@@ -168,7 +168,8 @@ mod tests {
                 ..crate::server::timeout::DeadlineGate::default()
             },
             conn_guard: crate::server::ConnGuard::for_test("127.0.0.1".parse().unwrap()),
-            abort_socket: None,
+            close: crate::server::service::ConnClose::None,
+            alt_svc: None,
         }
     }
 

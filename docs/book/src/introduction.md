@@ -1,5 +1,7 @@
 # Verdigris
 
+![Verdigris logo](icon.svg)
+
 **Documentation for verd 1.7.0.**
 
 Verdigris is a self-hosting web server and reverse proxy in a single static
@@ -9,6 +11,8 @@ a readable TOML configuration.
 ## What it does
 
 - HTTP/1.1 and HTTP/2 (plus h2c) on the same listener, downstream and upstream
+- HTTP/3 (QUIC) on TLS listeners and `h3://` upstreams, off by default;
+  WebSockets ride RFC 9220 extended CONNECT over h3
 - Static files with ranges, ETag/Last-Modified validators, precompressed variants
 - Reverse proxy with load balancing, retries, health checks, HTTP upgrades (WebSockets)
 - TLS termination with manual certificates, self-signed, or fully automatic

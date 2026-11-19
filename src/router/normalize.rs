@@ -298,4 +298,34 @@ wp-config.php
             ]
         );
     }
+
+    proptest::proptest! {
+        /// The invariant the filesystem join and `path_deny` matching
+        /// rely on: on success the path is absolute and every segment
+        /// is a plain segment — never `..`, `.` or empty. Also checks
+        /// normalization never expands the path. `Err` inputs are
+        /// unconstrained — rejecting is itself a correct outcome.
+        #[test]
+        fn normalized_output_has_only_plain_segments(
+            segs in proptest::collection::vec(
+                proptest::sample::select(&[
+                    "", ".", "..", "%2e", "%2e%2e", "%2f", "ab", "a b",
+                    "%00", "%09", "%ff", "%252e", "deep/name",
+                ]),
+                0..=6,
+            )
+        ) {
+            let raw = format!("/{}", segs.join("/"));
+            if let Ok(p) = normalize_path(&raw) {
+                assert!(p.starts_with('/'));
+                if p != "/" {
+                    let body = p.strip_suffix('/').unwrap_or(&p);
+                    for seg in body.split('/').skip(1) {
+                        assert!(!seg.is_empty() && seg != "." && seg != "..");
+                    }
+                }
+                assert!(p.len() <= raw.len() + 1);
+            }
+        }
+    }
 }

@@ -22,8 +22,10 @@ proxy = { upstream = "app", rewrite = { strip_prefix = "/api" } }
 ## Upstreams
 
 - **Protocols**: `http://`, `https://`, `h2c://` (cleartext HTTP/2 with
-  prior knowledge). ALPN on `https://` picks h2 automatically; a shared
-  h2 connection multiplexes requests per member.
+  prior knowledge), `h3://` (HTTP/3 over QUIC — always TLS). ALPN on
+  `https://` picks h2 automatically; a shared h2 connection multiplexes
+  requests per member, and an `h3://` member shares one QUIC connection
+  the same way.
 - **Balancing**: `round_robin` (smooth weighted), `least_conn`
   (`inflight / weight`), `ip_hash` (weight-proportional ring). Entries
   can carry `weight` and `backup`:

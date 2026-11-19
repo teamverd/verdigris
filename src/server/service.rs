@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Instant;
 
-use hyper::body::Incoming;
+use bytes::Bytes;
 
 use crate::body::{self, BoxBody, LimitBody, TimeoutBody};
 use crate::config::model as cfg;
@@ -19,7 +19,7 @@ use crate::server::Runtime;
 /// responding" (`path_deny.close`, Caddy `abort` parity). A middleware
 /// plants it in the early response's extensions; [`handle`] spots it,
 /// emits the access record itself (there is no response body to wrap),
-/// force-shuts the socket via `ConnCtx::abort_socket` (hyper alone only
+/// force-shuts the transport via `ConnCtx::close` (hyper alone only
 /// RST_STREAMs an h2 stream — the connection must die), and returns it
 /// as the service error — nothing is ever written.
 #[derive(Debug, Clone)]
@@ -55,22 +55,58 @@ pub struct ConnCtx {
     /// upgraded tunnel keeps counting against connection limits until
     /// it actually closes.
     pub conn_guard: crate::server::ConnGuard,
-    /// A second handle on the connection socket, force-closed by
-    /// [`Abort`]-marked responses. The service error alone drops an h1
-    /// connection, but hyper maps service errors to a per-stream
-    /// RST_STREAM on h2 and keeps the connection alive — `close = true`
-    /// promises connection teardown on both protocols.
-    pub abort_socket: Option<Arc<std::net::TcpStream>>,
+    /// Transport handle force-closed by [`Abort`]-marked responses.
+    /// The service error alone drops an h1 connection, but hyper maps
+    /// service errors to a per-stream RST_STREAM on h2 — `close = true`
+    /// promises connection teardown on every protocol.
+    pub close: ConnClose,
+    /// `Alt-Svc` value to advertise on this connection's responses —
+    /// `h3=":port"` on TCP listeners that also serve QUIC. `None` on
+    /// plaintext listeners and on QUIC itself (no need to advertise
+    /// HTTP/3 to a client already speaking it).
+    pub alt_svc: Option<http::HeaderValue>,
 }
 
-/// Entry point for every request, called by hyper per request on a
-/// connection. Only [`Abort`] escapes as an error — every other failure
-/// becomes a response.
-pub async fn handle(
-    req: http::Request<Incoming>,
+/// How a connection dies when [`Abort`] fires.
+#[derive(Clone)]
+pub enum ConnClose {
+    /// No force-close handle (tests).
+    None,
+    /// TCP socket duplicated before the TLS/hyper layers took it.
+    Tcp(Arc<std::net::TcpStream>),
+    /// QUIC connection — `close()` resets every stream, which is what
+    /// `path_deny.close` means on HTTP/3.
+    Quic(quinn::Connection),
+}
+
+impl ConnClose {
+    /// Force-close the transport now.
+    pub fn close_now(&self) {
+        match self {
+            Self::None => {}
+            Self::Tcp(tcp) => {
+                let _ = tcp.shutdown(std::net::Shutdown::Both);
+            }
+            Self::Quic(conn) => {
+                conn.close(quinn::VarInt::from_u32(0x0100), b"");
+            }
+        }
+    }
+}
+
+/// Entry point for every request — called by hyper per request on a
+/// TCP connection, and per stream by the QUIC server on HTTP/3. Only
+/// [`Abort`] escapes as an error — every other failure becomes a
+/// response.
+pub async fn handle<B>(
+    req: http::Request<B>,
     ctx: ConnCtx,
     rt: Arc<Runtime>,
-) -> Result<http::Response<BoxBody>, Abort> {
+) -> Result<http::Response<BoxBody>, Abort>
+where
+    B: http_body::Body<Data = Bytes> + Send + 'static,
+    B::Error: Into<crate::errors::BoxError>,
+{
     let started = Instant::now();
     ctx.request_counter.fetch_add(1, Ordering::Relaxed);
     // the response cycle owns the connection until its body ends —
@@ -99,7 +135,7 @@ pub async fn handle(
     let method_is_head = parts.method == http::Method::HEAD;
     let mut log = observe::LogRecord::new(&ctx, &parts, &req_id);
 
-    let response = pipeline(parts, body, &ctx, &rt, &mut log).await;
+    let response = pipeline(parts, body::boxed(body), &ctx, &rt, &mut log).await;
     let mut response = match response {
         Ok(r) => r,
         Err(resp) => resp, // early-exit responses travel the error channel
@@ -114,16 +150,14 @@ pub async fn handle(
         crate::observe::metrics::request_done(&log);
         // h2 keeps the connection up past a service error (per-stream
         // RST_STREAM); `close = true` means the connection dies.
-        if let Some(tcp) = &ctx.abort_socket {
-            let _ = tcp.shutdown(std::net::Shutdown::Both);
-        }
+        ctx.close.close_now();
         ctx.read_gate.active.fetch_sub(1, Ordering::Release);
         ctx.read_gate.wake_reader();
         ctx.first_request_done.store(true, Ordering::Relaxed);
         return Err(Abort);
     }
 
-    finish_response(&mut response, &rt, &req_id);
+    finish_response(&mut response, &rt, &ctx, &req_id);
     ctx.first_request_done.store(true, Ordering::Relaxed);
     // response-side fields now; the body wrapper counts streamed bytes
     // and emits the record (or 499 on client abort) at stream end
@@ -146,7 +180,7 @@ pub async fn handle(
 #[allow(clippy::result_large_err)]
 async fn pipeline(
     mut parts: http::request::Parts,
-    body: Incoming,
+    body: BoxBody,
     ctx: &ConnCtx,
     rt: &Arc<Runtime>,
     log: &mut observe::LogRecord,
@@ -361,11 +395,7 @@ async fn pipeline(
         )));
     }
     let body = TimeoutBody::new(
-        LimitBody::counted(
-            body::boxed(body),
-            route.limits.body_bytes.0,
-            log.req_bytes(),
-        ),
+        LimitBody::counted(body, route.limits.body_bytes.0, log.req_bytes()),
         route.timeouts.body_read,
     );
     // the route's send deadline also bounds tunnel inactivity if this
@@ -484,11 +514,21 @@ fn https_redirect(
     Some(resp)
 }
 
-/// Post-pipeline response decoration: Server header, request id echo.
-fn finish_response(resp: &mut http::Response<BoxBody>, rt: &Runtime, req_id: &RequestId) {
+/// Post-pipeline response decoration: Server header, request id echo,
+/// `Alt-Svc` advertisement on connections whose listener also serves
+/// HTTP/3.
+fn finish_response(
+    resp: &mut http::Response<BoxBody>,
+    rt: &Runtime,
+    ctx: &ConnCtx,
+    req_id: &RequestId,
+) {
     let headers = resp.headers_mut();
     if let Some(v) = &rt.server_header {
         headers.insert(http::header::SERVER, v.clone());
+    }
+    if let Some(v) = &ctx.alt_svc {
+        headers.insert(http::header::ALT_SVC, v.clone());
     }
     if let Ok(v) = http::HeaderValue::from_str(req_id.as_str()) {
         headers.insert(http::HeaderName::from_static("x-request-id"), v);
@@ -739,7 +779,8 @@ respond = { status = 200, body = "hi" }
                         conn_guard: crate::server::ConnGuard::for_test(
                             "127.0.0.1".parse().unwrap(),
                         ),
-                        abort_socket: None,
+                        close: ConnClose::None,
+                        alt_svc: None,
                     };
                     handle(req, ctx, rt).await
                 }

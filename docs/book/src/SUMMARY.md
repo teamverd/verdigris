@@ -9,6 +9,7 @@
 - [Static file serving](./static.md)
 - [Reverse proxy & load balancing](./proxy.md)
 - [TLS, ACME & redirects](./tls.md)
+- [HTTP/3 (QUIC)](./http3.md)
 - [Middleware](./middleware.md)
 - [Caching](./caching.md)
 - [Observability](./observability.md)

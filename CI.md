@@ -158,6 +158,19 @@ tag push fires `release.yml`.
   compare remains the candidate if that's ever needed.
 - **Sanitizers/Miri on the main crate** — one sanctioned `unsafe`
   (mmap); fuzzers already run under ASan/UBSan.
+- **Kani model checking** — evaluated 2026-11: `#[kani::proof]`
+  harnesses verify real code but every security-relevant target here
+  is `&str`-based, and std `str`/`String`/`memchr` machinery makes
+  CBMC's solver cost minutes-to-never per harness even on *concrete*
+  inputs (measured: empty proof = 0.02s, `parent_prefix("/a/b/c")` =
+  44s with `#[kani::unwind(8)]`, `normalize_path`/`parse_range`
+  harnesses > 15–20 min unsolved at 19–41 byte inputs — a documented
+  Kani limitation the verify-rust-std effort also hits). The pilot did
+  catch one real bug (`encoding_quality` escaping its documented
+  0–1000 range), whose invariants now live as proptests. Revisit for
+  scalar-only modules (no `&str`/`String`/`Instant`/`HashMap`) or when
+  `-Z synthesize-loop-contracts` ships in a release bundle (missing
+  `goto-synthesizer` in 0.68).
 - **`cargo vet`, `loom`, `minimal-versions`, Semgrep, hadolint, taplo**
   — real gains but high maintenance or marginal over existing coverage.
 

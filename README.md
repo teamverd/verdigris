@@ -1,5 +1,7 @@
 # Verdigris
 
+![Verdigris logo](icon.svg)
+
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/teamverd/verdigris/badge)](https://scorecard.dev/viewer/?uri=github.com/teamverd/verdigris)
 [![OpenSSF Best Practices](https://www.bestpractices.dev/projects/15915/badge)](https://www.bestpractices.dev/projects/15915)
 [![codecov](https://codecov.io/gh/teamverd/verdigris/graph/badge.svg)](https://codecov.io/gh/teamverd/verdigris)

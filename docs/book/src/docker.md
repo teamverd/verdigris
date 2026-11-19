@@ -24,6 +24,9 @@ automatic HTTP→HTTPS redirect: it advertises the bound port unless the
 TLS listen entry sets `external_port` — see
 [TLS, ACME & redirects](./tls.md#httphttps-and-security-headers).
 
+HTTP/3 listens on **UDP** — publish it separately when `http3` is on:
+`-p 443:443 -p 443:443/udp` (port mappings are TCP-only by default).
+
 ## Compose
 
 `docker-compose.yml` at the repo root runs a demo: static site, an

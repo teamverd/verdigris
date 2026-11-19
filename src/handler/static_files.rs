@@ -685,7 +685,10 @@ fn encoding_quality(accept: &str, encoding: &str) -> u16 {
             if let Some(v) = p.strip_prefix("q=")
                 && let Ok(f) = v.parse::<f32>()
             {
-                quality = (f * 1000.0) as u16;
+                // clamp: `q=9` would otherwise smear 9000 into u16
+                // space (and `q=999` saturates at u16::MAX) — out of
+                // this function's documented 0–1000 range
+                quality = (f * 1000.0).clamp(0.0, 1000.0) as u16;
             }
         }
         if token.eq_ignore_ascii_case(encoding) && quality > q {
@@ -817,6 +820,11 @@ mod tests {
         assert_eq!(encoding_quality("gzip;q=0", "gzip"), 0);
         assert_eq!(encoding_quality("*", "br"), 999);
         assert_eq!(encoding_quality("identity", "br"), 0);
+        // out-of-range q clamps to the documented 0–1000 range instead
+        // of smearing through the float→u16 cast
+        assert_eq!(encoding_quality("br;q=9", "br"), 1000);
+        assert_eq!(encoding_quality("br;q=999", "br"), 1000);
+        assert_eq!(encoding_quality("br;q=-1", "br"), 0);
     }
 
     #[test]
@@ -1153,5 +1161,55 @@ mod handler_tests {
         let s = Static::build(&cfg_with(d.path(), |_| {}), "/", "s").unwrap();
         let r = s.handle(req(Method::GET, "/s.sock"), &ctx("/s.sock")).await;
         assert_eq!(r.status(), 404);
+    }
+
+    proptest::proptest! {
+        /// `RangeResult::One` is always a satisfiable in-bounds window
+        /// — `start <= end < size` — for every well-formed header and
+        /// file size (incl. `size == 0` and `u64::MAX` endpoints). This
+        /// is the CVE-2017-7529 class: nginx's range-math overflow
+        /// leaked memory contents.
+        #[test]
+        fn parsed_range_is_in_bounds(
+            a in proptest::prelude::any::<u64>(),
+            b in proptest::prelude::any::<u64>(),
+            size in proptest::prelude::any::<u64>(),
+            form in 0u8..3,
+        ) {
+            let header = match form {
+                0 => format!("bytes={a}-{b}"),
+                1 => format!("bytes={a}-"),
+                _ => format!("bytes=-{b}"),
+            };
+            if let RangeResult::One(start, end) = parse_range(&header, size) {
+                assert!(start <= end);
+                assert!(end < size);
+            }
+        }
+
+        /// Arbitrary headers must never panic, and any `One` still
+        /// lands in bounds (malformed input resolves to
+        /// `Invalid`/`Multi`).
+        #[test]
+        fn parse_range_never_panics(
+            header in ".*",
+            size in proptest::prelude::any::<u64>(),
+        ) {
+            if let RangeResult::One(start, end) = parse_range(&header, size) {
+                assert!(start <= end);
+                assert!(end < size);
+            }
+        }
+
+        /// The documented contract is a quality in 0–1000 (RFC 9110
+        /// qvalues scaled by 1000); out-of-range `q` must clamp, not
+        /// wrap through the u16 cast.
+        #[test]
+        fn encoding_quality_in_range(
+            accept in "[a-z,;=\\.q* ]{0,24}",
+            enc in proptest::sample::select(&["br", "gzip", "*", "zz"]),
+        ) {
+            assert!(encoding_quality(&accept, enc) <= 1000);
+        }
     }
 }

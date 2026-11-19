@@ -14,7 +14,7 @@ use tokio::sync::watch;
 use tokio_rustls::TlsAcceptor;
 
 use crate::proxy::cluster::IoT;
-use crate::server::service::{self, ConnCtx};
+use crate::server::service::{self, ConnClose, ConnCtx};
 use crate::server::timeout::{DeadlineGate, TimeoutIo};
 use crate::server::{Runtime, Shared};
 
@@ -24,6 +24,7 @@ use crate::server::{Runtime, Shared};
 pub async fn accept_loop(
     listener: TcpListener,
     tls: bool,
+    alt_svc: Option<http::HeaderValue>,
     shared: Arc<Shared>,
     mut shutdown: watch::Receiver<bool>,
 ) {
@@ -72,8 +73,9 @@ pub async fn accept_loop(
             None
         };
         let watcher = graceful.watcher();
+        let alt_svc = alt_svc.clone();
         conns.spawn(async move {
-            serve_conn(stream, peer, acceptor, rt, watcher, guard).await;
+            serve_conn(stream, peer, acceptor, alt_svc, rt, watcher, guard).await;
         });
     }
 
@@ -97,6 +99,7 @@ async fn serve_conn(
     stream: TcpStream,
     peer: SocketAddr,
     acceptor: Option<TlsAcceptor>,
+    alt_svc: Option<http::HeaderValue>,
     rt: Arc<Runtime>,
     watcher: Watcher,
     conn_guard: crate::server::ConnGuard,
@@ -169,7 +172,8 @@ async fn serve_conn(
         first_request_done: first_request_done.clone(),
         read_gate,
         conn_guard,
-        abort_socket: watchdog_tcp,
+        close: watchdog_tcp.map_or(ConnClose::None, ConnClose::Tcp),
+        alt_svc,
     };
     crate::observe::metrics::conn_active(1.0);
     let svc = service_fn(|req| {

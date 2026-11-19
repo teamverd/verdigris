@@ -244,10 +244,19 @@ impl Proxy {
     ) -> http::Response<BoxBody> {
         let cluster = self.cluster.clone();
         let mut req = req;
-        let upgrade_intent = headers::wants_upgrade(req.headers());
+        // HTTP/3 requests can never take the classic upgrade path:
+        // `hyper::upgrade::on` yields a TCP IO, and WebSocket over h3 is
+        // RFC 9220 extended CONNECT — a different mechanism.
+        let upgrade_intent =
+            headers::wants_upgrade(req.headers()) && req.version() != http::Version::HTTP_3;
+        // RFC 9220: an h3 request with CONNECT + `:protocol` is an
+        // extended-CONNECT tunnel request (WebSocket, WebTransport…)
+        let ext_connect = req.method() == http::Method::CONNECT
+            && req.extensions().get::<h3::ext::Protocol>().is_some();
+        let tunnel_intent = upgrade_intent || ext_connect;
         // a tunnel will own the socket after this — permanently disarm
         // the connection's between-requests read deadline for it
-        let deadline_off = upgrade_intent
+        let deadline_off = tunnel_intent
             .then(|| {
                 req.extensions()
                     .get::<crate::server::timeout::DeadlineOff>()
@@ -257,12 +266,12 @@ impl Proxy {
         // a tunnel owns a socket after the response — keep the
         // connection's admission slot (cloned share, not a new slot)
         // counted for the tunnel's lifetime
-        let conn_slot = upgrade_intent
+        let conn_slot = tunnel_intent
             .then(|| req.extensions().get::<crate::server::ConnGuard>().cloned())
             .flatten();
         // route send deadline → tunnel inactivity bound (the upstream
         // half of a tunnel has no TimeoutIo around it)
-        let send_deadline = upgrade_intent
+        let send_deadline = tunnel_intent
             .then(|| {
                 req.extensions()
                     .get::<crate::server::timeout::SendDeadline>()
@@ -276,7 +285,21 @@ impl Proxy {
         } else {
             None
         };
-        let idem = lb::idempotent(req.method()) && !upgrade_intent;
+        // the upgrade token / :protocol value for tunnel bootstraps —
+        // captured before `into_parts` moves the extensions
+        let tunnel_proto: Option<String> = if ext_connect {
+            req.extensions()
+                .get::<h3::ext::Protocol>()
+                .map(|p| p.as_str().to_string())
+        } else if upgrade_intent {
+            req.headers()
+                .get(http::header::UPGRADE)
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_string)
+        } else {
+            None
+        };
+        let idem = lb::idempotent(req.method()) && !tunnel_intent;
         let replayable = req.body().is_end_stream();
         let (mut parts, body) = req.into_parts();
 
@@ -350,12 +373,71 @@ impl Proxy {
                     }
                 }
             };
-            let h2 = matches!(checkout, Checkout::H2 { .. });
+            // multiplexed conns (h2, h3) share rules: absolute-form URI,
+            // te: trailers passthrough, per-stream version
+            let multiplexed = matches!(checkout, Checkout::H2 { .. } | Checkout::H3 { .. });
+            let h3 = matches!(checkout, Checkout::H3 { .. });
+
+            // Tunnel path — engaged when either side can't take the
+            // classic `Upgrade` wire form:
+            //   ext_connect              → h3 downstream, any upstream
+            //   upgrade_intent + h2/h3   → classic downstream, but
+            //     `connection: upgrade` is not a legal h2/h3 field —
+            //     those need RFC 8441/9220 extended CONNECT instead.
+            // classic→h1 upgrades stay on the `hyper::upgrade` path.
+            if ext_connect || (upgrade_intent && multiplexed) {
+                let Some(proto) = tunnel_proto.as_deref() else {
+                    return Self::error_for(&UpError::Send(
+                        "upgrade request without a protocol token".into(),
+                    ));
+                };
+                let res = self
+                    .tunnel_attempt(TunnelAttempt {
+                        checkout,
+                        parts: &parts,
+                        headers_ops: &self.headers,
+                        orig_host: &orig_host,
+                        target: &target,
+                        member: member.clone(),
+                        cluster: cluster.clone(),
+                        member_addr,
+                        proto,
+                        ext_connect,
+                        first_body: first_body.take(),
+                        client_upgrade: client_upgrade.take(),
+                        conn_slot: conn_slot.clone(),
+                        deadline_off: deadline_off.clone(),
+                        send_deadline,
+                        inflight,
+                    })
+                    .await;
+                match res {
+                    Ok(resp) => {
+                        member.report_success();
+                        member.meters.attempt(true);
+                        member.meters.set_healthy(true);
+                        return resp;
+                    }
+                    Err(e) => {
+                        member.report_failure(cluster.health.passive.as_ref());
+                        member.meters.attempt(false);
+                        member.meters.set_healthy(member.healthy());
+                        match self.retry_slot(idem, replayable, retries_used) {
+                            Some(g) if matches!(e, UpError::Connect | UpError::ConnectTimeout) => {
+                                _budget_slot = Some(g);
+                                retries_used += 1;
+                                continue;
+                            }
+                            _ => return Self::error_for(&e),
+                        }
+                    }
+                }
+            }
 
             // per-attempt header copy: host, te-trailers, user ops differ
             // per member/connection kind
             let mut headers = parts.headers.clone();
-            headers::preserve_te_trailers(&mut headers, &orig_headers, h2);
+            headers::preserve_te_trailers(&mut headers, &orig_headers, multiplexed);
             // exactly one outbound Host: the upstream authority for
             // host_header = "upstream", else the client Host we routed on.
             // `insert`
@@ -377,9 +459,10 @@ impl Proxy {
             let out_body = first_body.take().unwrap_or_else(body::empty);
             let mut out_req = http::Request::new(out_body);
             *out_req.method_mut() = parts.method.clone();
-            // h2 conn requires :authority → absolute-form URI built from the
-            // (possibly rewritten) Host header; h1 gets origin-form.
-            if h2 {
+            // multiplexed conns require :authority → absolute-form URI
+            // built from the (possibly rewritten) Host header; h1 gets
+            // origin-form.
+            if multiplexed {
                 let authority = headers
                     .get(HOST)
                     .and_then(|v| v.to_str().ok())
@@ -397,7 +480,9 @@ impl Proxy {
             } else {
                 *out_req.uri_mut() = target.clone();
             }
-            *out_req.version_mut() = if h2 {
+            *out_req.version_mut() = if h3 {
+                http::Version::HTTP_3
+            } else if multiplexed {
                 http::Version::HTTP_2
             } else {
                 http::Version::HTTP_11
@@ -412,12 +497,14 @@ impl Proxy {
                     member.meters.attempt(false);
                     member.meters.set_healthy(member.healthy());
                     match self.retry_slot(idem, replayable, retries_used) {
-                        Some(g) if lb::conn_failure(&e) => {
+                        // Connect* = the request may never have reached
+                        // the upstream — the only safe kind to retry
+                        Some(g) if matches!(e, UpError::Connect | UpError::ConnectTimeout) => {
                             _budget_slot = Some(g);
                             retries_used += 1;
                             continue;
                         }
-                        _ => return Self::error_for(&UpError::Send(e.to_string())),
+                        _ => return Self::error_for(&e),
                     }
                 }
                 Err(_) => {
@@ -513,6 +600,212 @@ impl Proxy {
         };
         crate::server::service::error_response(status, msg)
     }
+
+    /// One tunnel request against a checked-out member: build the
+    /// protocol-correct bootstrap (classic `Upgrade` for h1, RFC 8441
+    /// extended CONNECT for h2, RFC 9220 for h3), send it, and on
+    /// acceptance splice the client side to the upstream end under the
+    /// process-wide tunnel tracker. Returns the downstream response —
+    /// `200`/`101` on success (the tunnel itself is already spawned),
+    /// or the upstream's decline forwarded like any other reply.
+    async fn tunnel_attempt(
+        &self,
+        a: TunnelAttempt<'_>,
+    ) -> Result<http::Response<BoxBody>, UpError> {
+        // per-attempt header copy with the same Host/ops policy as the
+        // normal path — then the protocol-specific bootstrap fields
+        let mut headers = a.parts.headers.clone();
+        let host_out = match &self.host_header {
+            cfg::HostHeader::Upstream => a.member.url.authority(),
+            cfg::HostHeader::Original => a.orig_host.to_string(),
+            cfg::HostHeader::Custom(v) | cfg::HostHeader::Verbatim(v) => v.clone(),
+        };
+        if let Ok(v) = HeaderValue::from_str(&host_out) {
+            headers.insert(HOST, v);
+        }
+        if let Some(ops) = a.headers_ops {
+            ops.apply(&mut headers);
+        }
+        // tunnels carry no entity body — the byte stream rides framing
+        headers.remove(http::header::CONTENT_LENGTH);
+        headers.remove(http::header::TRANSFER_ENCODING);
+
+        let mut out_req = http::Request::new(body::empty());
+        match &a.checkout {
+            Checkout::H1 { .. } => {
+                // classic bootstrap: RFC 9110 Upgrade. `sec-websocket-*`
+                // ride through from the client headers; key/version are
+                // synthesized when the h3 side legitimately omitted them
+                headers.insert(
+                    http::header::CONNECTION,
+                    HeaderValue::from_static("upgrade"),
+                );
+                if let Ok(v) = HeaderValue::from_str(a.proto) {
+                    headers.insert(http::header::UPGRADE, v);
+                }
+                headers
+                    .entry(SEC_WEBSOCKET_VERSION)
+                    .or_insert(HeaderValue::from_static("13"));
+                headers.entry(SEC_WEBSOCKET_KEY).or_insert_with(ws_key);
+                *out_req.method_mut() = http::Method::GET;
+                *out_req.uri_mut() = a.target.clone();
+                *out_req.version_mut() = http::Version::HTTP_11;
+            }
+            Checkout::H2 { .. } => {
+                // RFC 8441: CONNECT + `:protocol` via the hyper ext
+                *out_req.method_mut() = http::Method::CONNECT;
+                out_req
+                    .extensions_mut()
+                    .insert(hyper::ext::Protocol::from(a.proto));
+                *out_req.uri_mut() = absolute_uri(a.target, &headers, &a.member);
+                *out_req.version_mut() = http::Version::HTTP_2;
+            }
+            Checkout::H3 { .. } => {
+                // RFC 9220: CONNECT + `:protocol` via the h3 ext —
+                // vendored h3 accepts arbitrary registered tokens
+                *out_req.method_mut() = http::Method::CONNECT;
+                if let Ok(p) = a.proto.parse::<h3::ext::Protocol>() {
+                    out_req.extensions_mut().insert(p);
+                }
+                *out_req.uri_mut() = absolute_uri(a.target, &headers, &a.member);
+                *out_req.version_mut() = http::Version::HTTP_3;
+            }
+        }
+        *out_req.headers_mut() = headers;
+
+        let send = a.checkout.upgrade_send(out_req);
+        let outcome = match tokio::time::timeout(a.cluster.limits.response_header, send).await {
+            Ok(o) => o?,
+            Err(_) => return Err(UpError::HeaderTimeout),
+        };
+        let (up, resp_headers, permit) = match outcome {
+            cluster::UpgradeOutcome::Rejected { resp, ret } => {
+                // upstream declined — forward its response like any
+                // other reply (still wrapped for repool accounting)
+                let (rparts, rbody) = resp.into_parts();
+                let body = UpstreamBody {
+                    inner: rbody,
+                    member: a.member,
+                    ret: Some(ret),
+                    _inflight: a.inflight,
+                };
+                let mut out = http::Response::from_parts(rparts, body::boxed(body));
+                out.extensions_mut().insert(UpstreamUsed(a.member_addr));
+                return Ok(out);
+            }
+            cluster::UpgradeOutcome::Accepted {
+                up,
+                resp_headers,
+                permit,
+            } => (up, resp_headers, permit),
+        };
+
+        // accepted: build the client end and the downstream response
+        let counts = (
+            Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        );
+        let (client_end, mut resp) = if a.ext_connect {
+            // h3 downstream: head goes out on the claimed stream first
+            // (`H3TunnelStart`), then the tunnel gets the send half.
+            // The request body IS the client→upstream byte channel.
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            let end = ClientEnd::H3 {
+                send_rx: rx,
+                body: a.first_body.unwrap_or_else(body::empty),
+            };
+            let mut r = http::Response::new(body::empty());
+            *r.status_mut() = StatusCode::OK;
+            *r.headers_mut() = ws_response_headers(&resp_headers);
+            r.extensions_mut()
+                .insert(crate::server::quic::H3TunnelStart {
+                    tx: Arc::new(std::sync::Mutex::new(Some(tx))),
+                });
+            (end, r)
+        } else {
+            // classic downstream: synthesize the 101 the client expects
+            // — upstream answered ext-CONNECT (2xx), which never
+            // produces a Sec-WebSocket-Accept, so derive it locally
+            let Some(client_up) = a.client_upgrade else {
+                return Err(UpError::Send(
+                    "upgrade intent without an upgradeable request".into(),
+                ));
+            };
+            let end = ClientEnd::Io(client_up);
+            let mut r = http::Response::new(body::empty());
+            *r.status_mut() = StatusCode::SWITCHING_PROTOCOLS;
+            let mut h = http::HeaderMap::new();
+            h.insert(
+                http::header::CONNECTION,
+                HeaderValue::from_static("upgrade"),
+            );
+            if let Ok(v) = HeaderValue::from_str(a.proto) {
+                h.insert(http::header::UPGRADE, v);
+            }
+            if let Some(key) = a
+                .parts
+                .headers
+                .get(SEC_WEBSOCKET_KEY)
+                .and_then(|v| v.to_str().ok())
+                && let Ok(v) = HeaderValue::from_str(&ws_accept(key))
+            {
+                h.insert(SEC_WEBSOCKET_ACCEPT, v);
+            }
+            for (k, v) in ws_response_headers(&resp_headers) {
+                if let Some(k) = k {
+                    h.insert(k, v);
+                }
+            }
+            *r.headers_mut() = h;
+            (end, r)
+        };
+        if let Some(off) = a.deadline_off {
+            off.off.store(true, std::sync::atomic::Ordering::Relaxed);
+            off.wake_reader();
+        }
+        let stop = TUNNEL_STOP.clone();
+        TUNNELS.spawn(async move {
+            // conn slot held until the tunnel closes
+            let _conn_slot = a.conn_slot;
+            let _permit = permit;
+            crate::observe::metrics::tunnel_open();
+            tokio::select! {
+                _ = stop.cancelled() => {}
+                _ = tunnel_h3(client_end, up, counts.clone()) => {}
+                _ = tunnel_idle(counts.clone(), a.send_deadline) => {}
+            }
+            crate::observe::metrics::tunnel_close(
+                counts.0.load(std::sync::atomic::Ordering::Relaxed),
+                counts.1.load(std::sync::atomic::Ordering::Relaxed),
+            );
+        });
+        resp.extensions_mut().insert(UpstreamUsed(a.member_addr));
+        Ok(resp)
+    }
+}
+
+/// Everything one upstream tunnel attempt needs — grouped so the call
+/// in the retry loop stays readable.
+struct TunnelAttempt<'a> {
+    checkout: Checkout,
+    parts: &'a http::request::Parts,
+    headers_ops: &'a Option<middleware::HeaderOps>,
+    orig_host: &'a str,
+    target: &'a http::Uri,
+    member: Arc<Member>,
+    cluster: Arc<Cluster>,
+    member_addr: String,
+    proto: &'a str,
+    /// Downstream is h3 extended-CONNECT (vs classic `Upgrade`).
+    ext_connect: bool,
+    /// The h3 client's request body — the client→upstream byte channel.
+    first_body: Option<BoxBody>,
+    /// Classic downstream's `OnUpgrade` — present when `!ext_connect`.
+    client_upgrade: Option<hyper::upgrade::OnUpgrade>,
+    conn_slot: Option<crate::server::ConnGuard>,
+    deadline_off: Option<crate::server::timeout::DeadlineGate>,
+    send_deadline: std::time::Duration,
+    inflight: cluster::InflightGuard,
 }
 
 pin_project! {
@@ -606,6 +899,237 @@ async fn tunnel(
     }
 }
 
+// sec-websocket-* — not in the `http` crate's header constants
+const SEC_WEBSOCKET_KEY: http::HeaderName = http::HeaderName::from_static("sec-websocket-key");
+const SEC_WEBSOCKET_ACCEPT: http::HeaderName =
+    http::HeaderName::from_static("sec-websocket-accept");
+const SEC_WEBSOCKET_VERSION: http::HeaderName =
+    http::HeaderName::from_static("sec-websocket-version");
+const SEC_WEBSOCKET_PROTOCOL: http::HeaderName =
+    http::HeaderName::from_static("sec-websocket-protocol");
+const SEC_WEBSOCKET_EXTENSIONS: http::HeaderName =
+    http::HeaderName::from_static("sec-websocket-extensions");
+
+/// A random `Sec-WebSocket-Key` — RFC 6455 wants 16 random bytes,
+/// base64. UUID v4 is already on the dependency tree.
+fn ws_key() -> HeaderValue {
+    use base64::Engine;
+    let key = base64::engine::general_purpose::STANDARD.encode(uuid::Uuid::new_v4().as_bytes());
+    HeaderValue::from_str(&key).unwrap_or(HeaderValue::from_static("dGhlIHNhbXBsZSBub25jZQ=="))
+}
+
+/// `Sec-WebSocket-Accept` for a client key — RFC 6455 §4.2.2:
+/// `base64(SHA-1(key + GUID))`. Needed when the upstream answered
+/// extended-CONNECT (which has no accept field) and the classic
+/// client expects one.
+fn ws_accept(key: &str) -> String {
+    use base64::Engine;
+    use sha1::Digest;
+    let mut h = sha1::Sha1::new();
+    h.update(key.as_bytes());
+    h.update(b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11");
+    base64::engine::general_purpose::STANDARD.encode(h.finalize())
+}
+
+/// The WS handshake fields worth copying from an upstream's upgrade
+/// response into the downstream reply (subprotocol/extension picks).
+fn ws_response_headers(up: &http::HeaderMap) -> http::HeaderMap {
+    let mut out = http::HeaderMap::new();
+    for name in [
+        SEC_WEBSOCKET_PROTOCOL,
+        SEC_WEBSOCKET_EXTENSIONS,
+        SEC_WEBSOCKET_VERSION,
+    ] {
+        if let Some(v) = up.get(&name) {
+            out.insert(name, v.clone());
+        }
+    }
+    out
+}
+
+/// `https://{authority}{path}` for multiplexed upstreams — same
+/// construction the normal send path uses for h2/h3.
+fn absolute_uri(target: &http::Uri, headers: &http::HeaderMap, member: &Member) -> http::Uri {
+    let authority = headers
+        .get(HOST)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string)
+        .unwrap_or_else(|| member.url.authority());
+    http::Uri::from_maybe_shared(format!(
+        "https://{authority}{}",
+        target.path_and_query().map(|p| p.as_str()).unwrap_or("/")
+    ))
+    .unwrap_or_else(|_| target.clone())
+}
+
+/// The client side of a tunnel once the response is on the wire:
+/// either a classic `hyper::upgrade` socket, or an h3 downstream where
+/// the request body is the upload channel and the claimed send half
+/// (delivered after [`crate::server::quic::H3TunnelStart`]) is the
+/// download channel.
+enum ClientEnd {
+    Io(hyper::upgrade::OnUpgrade),
+    H3 {
+        send_rx: tokio::sync::oneshot::Receiver<
+            h3::server::RequestStream<h3_quinn::SendStream<Bytes>, Bytes>,
+        >,
+        body: BoxBody,
+    },
+}
+
+/// Byte source for one tunnel direction.
+enum TunnelRead {
+    /// Raw socket read (classic upgrade socket, either side).
+    Io(tokio::io::ReadHalf<hyper_util::rt::TokioIo<hyper::upgrade::Upgraded>>),
+    /// h3 downstream request body: DATA frames → bytes.
+    Body(BoxBody),
+    /// h3 upstream stream recv half: DATA frames → bytes.
+    H3(h3::client::RequestStream<h3_quinn::RecvStream, Bytes>),
+}
+
+/// Byte sink for one tunnel direction.
+enum TunnelWrite {
+    Io(tokio::io::WriteHalf<hyper_util::rt::TokioIo<hyper::upgrade::Upgraded>>),
+    /// h3 stream send half — server (downstream) or client (upstream);
+    /// both take `send_data(Bytes)`. Boxed: the h3 halves dwarf the Io
+    /// variant.
+    H3(Box<H3DataSink>),
+}
+
+/// Unify the two `send_data` halves — `h3::server` and `h3::client`
+/// request streams are distinct types with the same API.
+enum H3DataSink {
+    Server(h3::server::RequestStream<h3_quinn::SendStream<Bytes>, Bytes>),
+    Client(h3::client::RequestStream<h3_quinn::SendStream<Bytes>, Bytes>),
+}
+
+impl H3DataSink {
+    async fn send(&mut self, data: Bytes) -> Result<(), h3::error::StreamError> {
+        match self {
+            Self::Server(s) => s.send_data(data).await,
+            Self::Client(s) => s.send_data(data).await,
+        }
+    }
+
+    async fn close(&mut self) {
+        match self {
+            Self::Server(s) => {
+                let _ = s.finish().await;
+            }
+            Self::Client(s) => {
+                let _ = s.finish().await;
+            }
+        }
+    }
+}
+
+impl TunnelRead {
+    /// Next payload chunk; `None` on clean end or error (the other
+    /// direction's FIN/error propagates through the stream itself).
+    async fn next(&mut self, buf: &mut [u8]) -> Option<Bytes> {
+        match self {
+            Self::Io(io) => match tokio::io::AsyncReadExt::read(io, buf).await {
+                Ok(0) | Err(_) => None,
+                Ok(n) => Some(Bytes::copy_from_slice(&buf[..n])),
+            },
+            Self::Body(b) => match http_body_util::BodyExt::frame(b).await {
+                Some(Ok(f)) => f.into_data().ok(),
+                // trailers end the body; errors truncate it
+                _ => None,
+            },
+            Self::H3(r) => match r.recv_data().await {
+                Ok(Some(mut b)) => {
+                    use bytes::Buf;
+                    Some(b.copy_to_bytes(b.remaining()))
+                }
+                _ => None,
+            },
+        }
+    }
+}
+
+/// One direction of a tunnel: read → count → write → half-close.
+async fn tunnel_pump(
+    mut r: TunnelRead,
+    mut w: TunnelWrite,
+    count: Arc<std::sync::atomic::AtomicU64>,
+) {
+    let mut buf = vec![0u8; 16 * 1024];
+    while let Some(data) = r.next(&mut buf).await {
+        count.fetch_add(data.len() as u64, std::sync::atomic::Ordering::Relaxed);
+        let ok = match &mut w {
+            TunnelWrite::Io(io) => tokio::io::AsyncWriteExt::write_all(io, &data).await.is_ok(),
+            TunnelWrite::H3(s) => s.send(data).await.is_ok(),
+        };
+        if !ok {
+            return;
+        }
+    }
+    match &mut w {
+        TunnelWrite::Io(io) => {
+            let _ = tokio::io::AsyncWriteExt::shutdown(io).await;
+        }
+        TunnelWrite::H3(s) => s.close().await,
+    }
+}
+
+/// Splice a client end to an upstream end once both materialize —
+/// `OnUpgrade`s resolve when hyper detaches the io, the h3 downstream
+/// send half arrives after `serve_request` writes the response head.
+async fn tunnel_h3(
+    client: ClientEnd,
+    up: cluster::UpEnd,
+    counts: (
+        Arc<std::sync::atomic::AtomicU64>,
+        Arc<std::sync::atomic::AtomicU64>,
+    ),
+) {
+    // resolve the upstream end
+    let (up_read, up_write) = match up {
+        cluster::UpEnd::Io(on) => match on.await {
+            Ok(io) => {
+                let (r, w) = tokio::io::split(hyper_util::rt::TokioIo::new(io));
+                (TunnelRead::Io(r), TunnelWrite::Io(w))
+            }
+            Err(e) => {
+                tracing::debug!(error = %e, "upstream upgrade failed");
+                return;
+            }
+        },
+        cluster::UpEnd::H3(end) => (
+            TunnelRead::H3(end.recv),
+            TunnelWrite::H3(Box::new(H3DataSink::Client(end.send))),
+        ),
+    };
+    // resolve the client end
+    let (cl_read, cl_write) = match client {
+        ClientEnd::Io(on) => match on.await {
+            Ok(io) => {
+                let (r, w) = tokio::io::split(hyper_util::rt::TokioIo::new(io));
+                (TunnelRead::Io(r), TunnelWrite::Io(w))
+            }
+            Err(e) => {
+                tracing::debug!(error = %e, "client upgrade failed");
+                return;
+            }
+        },
+        ClientEnd::H3 { send_rx, body } => match send_rx.await {
+            Ok(send) => (
+                TunnelRead::Body(body),
+                TunnelWrite::H3(Box::new(H3DataSink::Server(send))),
+            ),
+            // head write failed or serve_request dropped the stream
+            Err(_) => return,
+        },
+    };
+    // c→u reads the client end, writes the upstream end; u→c the
+    // reverse. join! waits for both directions like copy_bidirectional.
+    let _ = tokio::join!(
+        tunnel_pump(cl_read, up_write, counts.0),
+        tunnel_pump(up_read, cl_write, counts.1),
+    );
+}
+
 /// Ends when a tunnel moves no bytes in either direction for `period`
 /// (the route's send deadline). An upstream that stops reading — or a
 /// tunnel left silent — would otherwise pin both sockets forever.
@@ -645,7 +1169,7 @@ pin_project! {
     /// live exactly as long as this body.
     struct UpstreamBody {
         #[pin]
-        inner: hyper::body::Incoming,
+        inner: BoxBody,
         member: Arc<Member>,
         ret: Option<Return>,
         _inflight: cluster::InflightGuard,
@@ -671,9 +1195,9 @@ impl Body for UpstreamBody {
             Poll::Ready(Some(Err(e))) => {
                 // dirty connection — drop it rather than repooling
                 this.ret.take();
-                Poll::Ready(Some(Err(e.into())))
+                Poll::Ready(Some(Err(e)))
             }
-            other => other.map(|o| o.map(|r| r.map_err(Into::into))),
+            other => other,
         }
     }
 

@@ -4071,8 +4071,9 @@ upstream.list = ["http://a2:9000", {{ url = "http://b2:9000", weight = 2, backup
 upstream.entry = {{ url = "http://c3:9000", weight = 4, backup = true }}
 
 [server]
-listen = [{{ addr = "127.0.0.1:18080", tls = true, external_port = 443 }}]
+listen = [{{ addr = "127.0.0.1:18080", tls = true, external_port = 443, http3 = true }}]
 graceful_timeout = "25s"
+http3 = true
 trusted_proxies = ["10.0.0.0/8"]
 server_header = "edge"
 max_connections = 4096

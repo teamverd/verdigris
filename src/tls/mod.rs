@@ -25,6 +25,11 @@ pub struct TlsRuntime {
     pub resolver: Arc<CertResolver>,
     /// Cert files watched for in-place reload.
     pub watch: Vec<WatchEntry>,
+    /// QUIC server config for HTTP/3 listeners — a second rustls
+    /// `ServerConfig` over the *same* resolver (ALPN `h3`), so SNI,
+    /// cert hot-reload, self-signed and ACME certs apply identically.
+    /// `Some` when any listener resolves `http3`.
+    pub quic: Option<Arc<quinn::ServerConfig>>,
 }
 
 impl TlsRuntime {
@@ -107,10 +112,47 @@ impl TlsRuntime {
             crate::acme::challenge::ACME_TLS_ALPN.to_vec(),
         ];
 
+        // QUIC needs its own `ServerConfig` (ALPN `h3` — TLS-ALPN-01 is
+        // TCP-only, h2/http1.1 don't exist over QUIC) but the *same*
+        // resolver: SNI, hot-reload, self-signed and ACME-issued certs
+        // then apply to QUIC handshakes identically. `max_early_data_size`
+        // stays at the rustls default 0 — no 0-RTT (replay risk for a
+        // server that proxies non-idempotent requests).
+        let quic = if config
+            .server
+            .listen
+            .iter()
+            .any(|l| l.http3_enabled(config.server.http3))
+        {
+            let mut qcfg = rustls::ServerConfig::builder()
+                .with_no_client_auth()
+                .with_cert_resolver(resolver.clone());
+            qcfg.alpn_protocols = vec![b"h3".to_vec()];
+            let crypto = quinn::crypto::rustls::QuicServerConfig::try_from(qcfg)
+                .map_err(|e| format!("quic server config: {e}"))?;
+            let mut sc = quinn::ServerConfig::with_crypto(Arc::new(crypto));
+            let mut transport = quinn::TransportConfig::default();
+            // parity with the h2 `max_concurrent_streams(200)` hardening
+            transport.max_concurrent_bidi_streams(quinn::VarInt::from_u32(200));
+            if !config.timeouts.idle.is_zero() {
+                transport.max_idle_timeout(Some(
+                    quinn::VarInt::from_u32(
+                        u32::try_from(config.timeouts.idle.as_millis()).unwrap_or(u32::MAX),
+                    )
+                    .into(),
+                ));
+            }
+            sc.transport_config(Arc::new(transport));
+            Some(Arc::new(sc))
+        } else {
+            None
+        };
+
         Ok(Some(Self {
             acceptor: TlsAcceptor::from(Arc::new(server_config)),
             resolver,
             watch,
+            quic,
         }))
     }
 

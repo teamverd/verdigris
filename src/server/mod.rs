@@ -3,6 +3,7 @@
 //! needs; it is swapped atomically on reload.
 
 pub mod conn;
+pub mod quic;
 pub mod service;
 pub mod timeout;
 
@@ -301,10 +302,12 @@ pub async fn serve_shared(
     // cached per-object, so the recorder must exist before traffic
     crate::observe::metrics::install();
     let rt = shared.load();
-    // bound listeners keyed by (addr, tls); the watch sender drains that
+    // bound listeners keyed by (addr, kind); the watch sender drains that
     // listener's accept loop when the entry is removed or the server stops
-    let mut bound: std::collections::HashMap<(SocketAddr, bool), tokio::sync::watch::Sender<bool>> =
-        std::collections::HashMap::new();
+    let mut bound: std::collections::HashMap<
+        (SocketAddr, ListenerKind),
+        tokio::sync::watch::Sender<bool>,
+    > = std::collections::HashMap::new();
     let mut tasks = tokio::task::JoinSet::new();
     for l in &rt.config.server.listen {
         let socket = TcpListener::bind(l.addr).await.map_err(|e| {
@@ -317,7 +320,32 @@ pub async fn serve_shared(
                 ),
             )
         })?;
-        spawn_listener(&mut tasks, &mut bound, socket, l.addr, l.tls, &shared);
+        spawn_listener(
+            &mut tasks,
+            &mut bound,
+            socket,
+            l,
+            alt_svc_for(l, rt.config.server.http3),
+            &shared,
+        );
+        if l.http3_enabled(rt.config.server.http3) {
+            let cfg = rt
+                .tls
+                .as_ref()
+                .and_then(|t| t.quic.clone())
+                .expect("http3-enabled listener implies tls.quic");
+            let endpoint = quinn::Endpoint::server((*cfg).clone(), l.addr).map_err(|e| {
+                std::io::Error::new(
+                    e.kind(),
+                    format!(
+                        "cannot bind {}/udp: {e} — {}",
+                        l.addr,
+                        crate::errors::bind_hint(&e)
+                    ),
+                )
+            })?;
+            spawn_quic(&mut tasks, &mut bound, endpoint, l.addr, &shared);
+        }
     }
 
     // per-generation background tasks stop when their token is cancelled
@@ -367,19 +395,91 @@ pub async fn serve_shared(
     Ok(())
 }
 
-/// Bind + spawn the accept loop for one listener.
+/// What a bound socket speaks — the listener map key alongside the
+/// address. TCP and QUIC share a `SocketAddr` legitimately: UDP has its
+/// own port space.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum ListenerKind {
+    /// TCP listener; `tls` distinguishes plaintext from TLS — a flip
+    /// means rebind, not keep (the accepted sockets must take the new
+    /// acceptor).
+    Tcp { tls: bool },
+    /// UDP endpoint speaking QUIC/HTTP-3. Only ever `tls` — QUIC has no
+    /// plaintext mode.
+    Quic,
+}
+
+/// All sockets a runtime wants bound: one TCP listener per `listen`
+/// entry, plus a QUIC endpoint on the same address when HTTP/3 resolves
+/// on for that entry.
+fn listener_keys(rt: &Runtime) -> std::collections::HashSet<(SocketAddr, ListenerKind)> {
+    let mut keys = std::collections::HashSet::new();
+    for l in &rt.config.server.listen {
+        keys.insert((l.addr, ListenerKind::Tcp { tls: l.tls }));
+        if l.http3_enabled(rt.config.server.http3) {
+            keys.insert((l.addr, ListenerKind::Quic));
+        }
+    }
+    keys
+}
+
+/// The `Alt-Svc` value this listener's TCP responses should carry —
+/// `h3=":port"` on the externally visible port when the entry also
+/// serves HTTP/3. `ma=86400` is the usual day-long advertisement.
+fn alt_svc_for(l: &cfg::ListenAddr, global_h3: bool) -> Option<http::HeaderValue> {
+    if !l.http3_enabled(global_h3) {
+        return None;
+    }
+    http::HeaderValue::from_str(&format!("h3=\":{}\"; ma=86400", l.advertised_port())).ok()
+}
+
+/// Bind + spawn the accept loop for one TCP listener.
 fn spawn_listener(
     tasks: &mut tokio::task::JoinSet<()>,
-    bound: &mut std::collections::HashMap<(SocketAddr, bool), tokio::sync::watch::Sender<bool>>,
+    bound: &mut std::collections::HashMap<
+        (SocketAddr, ListenerKind),
+        tokio::sync::watch::Sender<bool>,
+    >,
     socket: TcpListener,
-    addr: SocketAddr,
-    tls: bool,
+    l: &cfg::ListenAddr,
+    alt_svc: Option<http::HeaderValue>,
     shared: &Arc<Shared>,
 ) {
     let (tx, rx) = tokio::sync::watch::channel(false);
-    bound.insert((addr, tls), tx);
-    tracing::info!(%addr, tls, "listener bound");
-    tasks.spawn(conn::accept_loop(socket, tls, shared.clone(), rx));
+    bound.insert((l.addr, ListenerKind::Tcp { tls: l.tls }), tx);
+    tracing::info!(addr = %l.addr, tls = l.tls, "listener bound");
+    tasks.spawn(conn::accept_loop(
+        socket,
+        l.tls,
+        alt_svc,
+        shared.clone(),
+        rx,
+    ));
+}
+
+/// Register + spawn the accept loop for one QUIC endpoint.
+fn spawn_quic(
+    tasks: &mut tokio::task::JoinSet<()>,
+    bound: &mut std::collections::HashMap<
+        (SocketAddr, ListenerKind),
+        tokio::sync::watch::Sender<bool>,
+    >,
+    endpoint: quinn::Endpoint,
+    addr: SocketAddr,
+    shared: &Arc<Shared>,
+) {
+    let (tx, rx) = tokio::sync::watch::channel(false);
+    bound.insert((addr, ListenerKind::Quic), tx);
+    tracing::info!(%addr, "QUIC/HTTP-3 listener bound");
+    tasks.spawn(quic::accept_loop(endpoint, shared.clone(), rx));
+}
+
+/// A socket bound during the reload diff but not yet committed.
+enum PendingBind {
+    /// TCP socket + the listener entry that produced it.
+    Tcp(TcpListener, cfg::ListenAddr),
+    /// QUIC endpoint + the address it is bound to.
+    Quic(quinn::Endpoint, SocketAddr),
 }
 
 /// The per-generation background suite: upstream probes, cert hot reload,
@@ -434,7 +534,10 @@ async fn do_reload(
     shared: &Arc<Shared>,
     config_path: Option<&std::path::Path>,
     cause: &str,
-    bound: &mut std::collections::HashMap<(SocketAddr, bool), tokio::sync::watch::Sender<bool>>,
+    bound: &mut std::collections::HashMap<
+        (SocketAddr, ListenerKind),
+        tokio::sync::watch::Sender<bool>,
+    >,
     tasks: &mut tokio::task::JoinSet<()>,
     bg_stop: &mut tokio_util::sync::CancellationToken,
 ) -> Result<(), String> {
@@ -461,7 +564,10 @@ async fn do_reload(
 async fn reload_inner(
     shared: &Arc<Shared>,
     config_path: Option<&std::path::Path>,
-    bound: &mut std::collections::HashMap<(SocketAddr, bool), tokio::sync::watch::Sender<bool>>,
+    bound: &mut std::collections::HashMap<
+        (SocketAddr, ListenerKind),
+        tokio::sync::watch::Sender<bool>,
+    >,
     tasks: &mut tokio::task::JoinSet<()>,
 ) -> Result<(), String> {
     let path = config_path.ok_or_else(|| {
@@ -505,58 +611,103 @@ async fn reload_inner(
     }
 
     // listener diff: bind all newly-required sockets before committing
-    let desired: std::collections::HashSet<(SocketAddr, bool)> = new_rt
-        .config
-        .server
-        .listen
-        .iter()
-        .map(|l| (l.addr, l.tls))
-        .collect();
+    let desired = listener_keys(&new_rt);
     let mut pending = Vec::new();
-    for &(addr, tls) in &desired {
-        if bound.contains_key(&(addr, tls)) {
+    for &(addr, kind) in &desired {
+        if bound.contains_key(&(addr, kind)) {
             continue;
         }
-        // same addr but flipped tls flag counts as new — the old socket
-        // is removed below, and the bind happens after removal
-        if bound.contains_key(&(addr, !tls)) {
-            continue;
+        match kind {
+            ListenerKind::Tcp { tls } => {
+                // same addr bound with the flipped tls flag is handled
+                // by the rebind pass below — can't bind a TCP addr twice
+                if bound.contains_key(&(addr, ListenerKind::Tcp { tls: !tls })) {
+                    continue;
+                }
+                let l = new_rt
+                    .config
+                    .server
+                    .listen
+                    .iter()
+                    .find(|l| l.addr == addr && l.tls == tls)
+                    .expect("desired key came from a listener");
+                let socket = TcpListener::bind(addr).await.map_err(|e| {
+                    format!("cannot bind {addr}: {e} — {}", crate::errors::bind_hint(&e))
+                })?;
+                pending.push(PendingBind::Tcp(socket, l.clone()));
+            }
+            // UDP has its own port space — a QUIC endpoint never
+            // collides with a TCP bind on the same address
+            ListenerKind::Quic => {
+                let cfg = new_rt
+                    .tls
+                    .as_ref()
+                    .and_then(|t| t.quic.clone())
+                    .expect("http3-enabled listener implies tls.quic");
+                let endpoint = quinn::Endpoint::server((*cfg).clone(), addr).map_err(|e| {
+                    format!(
+                        "cannot bind {addr}/udp: {e} — {}",
+                        crate::errors::bind_hint(&e)
+                    )
+                })?;
+                pending.push(PendingBind::Quic(endpoint, addr));
+            }
         }
-        let socket = TcpListener::bind(addr)
-            .await
-            .map_err(|e| format!("cannot bind {addr}: {e} — {}", crate::errors::bind_hint(&e)))?;
-        pending.push((socket, addr, tls));
     }
-    // sockets whose addr survives with a flipped tls flag: drop first,
-    // then re-bind
+    // TCP sockets whose addr survives with a flipped tls flag: drop
+    // first, then re-bind
     let mut flipped = Vec::new();
-    for &(addr, tls) in &desired {
-        if bound.contains_key(&(addr, tls)) || !bound.contains_key(&(addr, !tls)) {
+    for &(addr, kind) in &desired {
+        let ListenerKind::Tcp { tls } = kind else {
+            continue;
+        };
+        let old_key = (addr, ListenerKind::Tcp { tls: !tls });
+        if bound.contains_key(&(addr, kind)) || !bound.contains_key(&old_key) {
             continue;
         }
-        if let Some(tx) = bound.remove(&(addr, !tls)) {
+        if let Some(tx) = bound.remove(&old_key) {
             let _ = tx.send(true);
         }
+        let l = new_rt
+            .config
+            .server
+            .listen
+            .iter()
+            .find(|l| l.addr == addr && l.tls == tls)
+            .expect("desired key came from a listener");
         let socket = TcpListener::bind(addr).await.map_err(|e| {
             format!(
                 "cannot rebind {addr}: {e} — {}",
                 crate::errors::bind_hint(&e)
             )
         })?;
-        flipped.push((socket, addr, tls));
+        flipped.push(PendingBind::Tcp(socket, l.clone()));
     }
 
     // commit: swap the runtime first so kept listeners serve the new
-    // generation on their next accepted connection
+    // generation on their next accepted connection (and kept QUIC
+    // endpoints pick up new certs on their next incoming handshake)
     shared.rt.store(new_rt.clone());
     new_rt.ready.store(true, Ordering::Relaxed);
     old.ready.store(false, Ordering::Relaxed);
 
-    for (socket, addr, tls) in pending.into_iter().chain(flipped) {
-        spawn_listener(tasks, bound, socket, addr, tls, shared);
+    for p in pending.into_iter().chain(flipped) {
+        match p {
+            PendingBind::Tcp(socket, l) => spawn_listener(
+                tasks,
+                bound,
+                socket,
+                &l,
+                alt_svc_for(&l, new_rt.config.server.http3),
+                shared,
+            ),
+            PendingBind::Quic(endpoint, addr) => {
+                spawn_quic(tasks, bound, endpoint, addr, shared);
+            }
+        }
     }
     // removed listeners drain: their accept loops shut down gracefully
-    let gone: Vec<(SocketAddr, bool)> = bound
+    let gone: Vec<(SocketAddr, ListenerKind)> = bound
         .keys()
         .filter(|k| !desired.contains(k))
         .copied()

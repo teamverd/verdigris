@@ -12,6 +12,7 @@ use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, AtomicUsize
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
+use bytes::Buf;
 use http::uri::Scheme;
 use rustls::ClientConfig;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
@@ -34,6 +35,10 @@ pub enum WantProto {
     H2,
     /// TLS with ALPN negotiation between h2 and HTTP/1.1 (`https://`).
     Alpn,
+    /// HTTP/3 over QUIC (`h3://`). Always TLS — QUIC has no plaintext
+    /// mode; there is no `h3c` shorthand because QUIC cleartext does
+    /// not exist.
+    H3,
 }
 
 /// A parsed upstream server URL.
@@ -66,9 +71,11 @@ impl UpstreamUrl {
             (WantProto::Alpn, true, 443)
         } else if scheme.as_str() == "h2c" {
             (WantProto::H2, false, 80)
+        } else if scheme.as_str() == "h3" {
+            (WantProto::H3, true, 443)
         } else {
             return Err(format!(
-                "upstream URL {raw:?} must have scheme http, https, or h2c — e.g. \"http://127.0.0.1:8080\""
+                "upstream URL {raw:?} must have scheme http, https, h2c, or h3 — e.g. \"http://127.0.0.1:8080\""
             ));
         };
         let authority = uri.authority().ok_or_else(|| {
@@ -105,7 +112,7 @@ impl UpstreamUrl {
     /// port and restoring IPv6 brackets.
     pub fn authority(&self) -> String {
         let default = match self.want {
-            WantProto::Alpn => 443,
+            WantProto::Alpn | WantProto::H3 => 443,
             _ => 80,
         };
         let host = if self.host.parse::<IpAddr>().is_ok_and(|ip| ip.is_ipv6()) {
@@ -138,26 +145,343 @@ pub enum Checkout {
         /// In-flight stream permit, released when the response body ends.
         permit: OwnedSemaphorePermit,
     },
+    /// HTTP/3: a stream on the shared member QUIC connection; the permit
+    /// caps concurrent streams like h2's does.
+    H3 {
+        /// Sender half of the shared h3 connection.
+        sr: h3::client::SendRequest<h3_quinn::OpenStreams, bytes::Bytes>,
+        /// In-flight stream permit, released when the response body ends.
+        permit: OwnedSemaphorePermit,
+    },
 }
 
 impl Checkout {
-    /// Send the request, returning the response and the token that decides
-    /// the connection's fate when the response body ends.
+    /// Send the request, returning the response (body already boxed for
+    /// the proxy's uniform downstream path) and the token that decides
+    /// the connection's fate when the body ends. `UpError::Connect`
+    /// signals a connection-level failure — the request may never have
+    /// reached the upstream, which is what makes it safe to retry.
     pub async fn send(
         self,
         req: http::Request<BoxBody>,
-    ) -> Result<(http::Response<hyper::body::Incoming>, Return), hyper::Error> {
+    ) -> Result<(http::Response<BoxBody>, Return), UpError> {
         match self {
             Self::H1 { mut sr, permit } => {
-                sr.ready().await?;
-                let resp = sr.send_request(req).await?;
-                Ok((resp, Return::H1 { sr, permit }))
+                sr.ready().await.map_err(map_hyper_err)?;
+                let resp = sr.send_request(req).await.map_err(map_hyper_err)?;
+                Ok((resp.map(crate::body::boxed), Return::H1 { sr, permit }))
             }
             Self::H2 { mut sr, permit } => {
-                let resp = sr.send_request(req).await?;
-                Ok((resp, Return::H2 { permit }))
+                let resp = sr.send_request(req).await.map_err(map_hyper_err)?;
+                Ok((resp.map(crate::body::boxed), Return::H2 { permit }))
+            }
+            Self::H3 { mut sr, permit } => h3_send(&mut sr, req)
+                .await
+                .map(|resp| (resp, Return::H3 { permit })),
+        }
+    }
+
+    /// Send an upgrade-shaped request (`req` already carries the right
+    /// method/headers/extensions for this checkout's protocol) and
+    /// report whether the upstream took the tunnel. On `Accepted` the
+    /// connection/stream halves move into [`UpEnd`]; on `Rejected` the
+    /// ordinary response + [`Return`] come back for the normal path.
+    pub async fn upgrade_send(
+        self,
+        req: http::Request<BoxBody>,
+    ) -> Result<UpgradeOutcome, UpError> {
+        match self {
+            Self::H1 { mut sr, permit } => {
+                sr.ready().await.map_err(map_hyper_err)?;
+                let mut resp = sr.send_request(req).await.map_err(map_hyper_err)?;
+                if resp.status() == http::StatusCode::SWITCHING_PROTOCOLS {
+                    let resp_headers = resp.headers().clone();
+                    let up = hyper::upgrade::on(&mut resp);
+                    Ok(UpgradeOutcome::Accepted {
+                        up: UpEnd::Io(up),
+                        resp_headers,
+                        permit,
+                    })
+                } else {
+                    Ok(UpgradeOutcome::Rejected {
+                        resp: resp.map(crate::body::boxed),
+                        ret: Return::H1 { sr, permit },
+                    })
+                }
+            }
+            Self::H2 { mut sr, permit } => {
+                let mut resp = sr.send_request(req).await.map_err(map_hyper_err)?;
+                // RFC 8441: an h2 extended-CONNECT succeeds on any 2xx
+                if resp.status().is_success() {
+                    let resp_headers = resp.headers().clone();
+                    let up = hyper::upgrade::on(&mut resp);
+                    Ok(UpgradeOutcome::Accepted {
+                        up: UpEnd::Io(up),
+                        resp_headers,
+                        permit,
+                    })
+                } else {
+                    Ok(UpgradeOutcome::Rejected {
+                        resp: resp.map(crate::body::boxed),
+                        ret: Return::H2 { permit },
+                    })
+                }
+            }
+            Self::H3 { mut sr, permit } => {
+                let (mut parts, _body) = req.into_parts();
+                strip_for_h3(&mut parts.headers);
+                let head = http::Request::from_parts(parts, ());
+                let stream = sr.send_request(head).await.map_err(map_h3_err)?;
+                let (mut send, mut recv) = stream.split();
+                let resp = match recv.recv_response().await {
+                    Ok(r) => r,
+                    Err(e) => return Err(map_h3_err(e)),
+                };
+                let (rparts, ()) = resp.into_parts();
+                // RFC 9220: success = 2xx, then DATA flows both ways
+                if rparts.status.is_success() {
+                    Ok(UpgradeOutcome::Accepted {
+                        up: UpEnd::H3(Box::new(H3UpEnd { send, recv })),
+                        resp_headers: rparts.headers,
+                        permit,
+                    })
+                } else {
+                    let _ = send.finish().await;
+                    let resp_body = H3ClientBody {
+                        recv,
+                        pump: None,
+                        recv_done: false,
+                        end: false,
+                    };
+                    Ok(UpgradeOutcome::Rejected {
+                        resp: http::Response::from_parts(rparts, crate::body::boxed(resp_body)),
+                        ret: Return::H3 { permit },
+                    })
+                }
             }
         }
+    }
+}
+
+/// `hyper::Error` → [`UpError`]: connection-level failures mean the
+/// request likely never completed and is safe to retry (the proxy gates
+/// retries on idempotency separately); anything else is a send error.
+fn map_hyper_err(e: hyper::Error) -> UpError {
+    if crate::proxy::lb::conn_failure(&e) {
+        UpError::Connect
+    } else {
+        UpError::Send(e.to_string())
+    }
+}
+
+/// Outcome of [`Checkout::upgrade_send`].
+pub enum UpgradeOutcome {
+    /// The upstream accepted the upgrade/extended-CONNECT: the tunnel
+    /// end, the upstream's response headers (for downstream handshake
+    /// synthesis), and the stream permit to hold for the tunnel's life.
+    Accepted {
+        /// The established upstream tunnel end.
+        up: UpEnd,
+        /// The upstream's response headers (subprotocol/extension
+        /// negotiation flows through them).
+        resp_headers: http::HeaderMap,
+        /// The connection/stream permit the tunnel must hold.
+        permit: OwnedSemaphorePermit,
+    },
+    /// The upstream declined — forward its response to the client like
+    /// any other reply.
+    Rejected {
+        /// The upstream's normal response.
+        resp: http::Response<BoxBody>,
+        /// Pool/return bookkeeping for the connection.
+        ret: Return,
+    },
+}
+
+/// The upstream half of an established tunnel: a raw socket (h1/h2
+/// classic or h2 extended-CONNECT via `hyper::upgrade`) or an h3
+/// stream pair.
+pub enum UpEnd {
+    /// `hyper::upgrade::OnUpgrade` — resolves to the raw IO once the
+    /// upstream conn detaches.
+    Io(hyper::upgrade::OnUpgrade),
+    /// h3 extended-CONNECT stream pair — boxed, it dwarfs `Io`.
+    H3(Box<H3UpEnd>),
+}
+
+/// The two halves of an h3 extended-CONNECT stream: `send` carries
+/// client→upstream DATA, `recv` carries upstream→client DATA.
+pub struct H3UpEnd {
+    /// Send half — client→upstream byte channel.
+    pub send: h3::client::RequestStream<h3_quinn::SendStream<bytes::Bytes>, bytes::Bytes>,
+    /// Recv half — upstream→client byte channel.
+    pub recv: h3::client::RequestStream<h3_quinn::RecvStream, bytes::Bytes>,
+}
+
+/// `h3::error::StreamError` → [`UpError`] with the same retry
+/// semantics: connection-dead and GOAWAY errors mean a fresh connection
+/// might accept the request; stream-level ones cannot.
+fn map_h3_err(e: h3::error::StreamError) -> UpError {
+    match e {
+        h3::error::StreamError::ConnectionError(_)
+        | h3::error::StreamError::Undefined(_)
+        | h3::error::StreamError::RemoteClosing => UpError::Connect,
+        other => UpError::Send(other.to_string()),
+    }
+}
+
+/// One h3 request/response: send head + body on the stream's send half
+/// (pumped concurrently — the upstream may respond before the upload
+/// ends), then read the response head. The response body stays on the
+/// stream's recv half inside [`H3ClientBody`].
+async fn h3_send(
+    sr: &mut h3::client::SendRequest<h3_quinn::OpenStreams, bytes::Bytes>,
+    req: http::Request<BoxBody>,
+) -> Result<http::Response<BoxBody>, UpError> {
+    let (mut parts, body) = req.into_parts();
+    // h3 forbids the connection-specific fields the TCP paths tolerate
+    // — strip them like the response-side pump does
+    strip_for_h3(&mut parts.headers);
+    let head = http::Request::from_parts(parts, ());
+    let stream = sr.send_request(head).await.map_err(map_h3_err)?;
+    let (send, mut recv) = stream.split();
+    // body upload on its own task — QUIC streams are full-duplex, so an
+    // early response (or a stalled upload) must not block recv_response
+    let pump = tokio::spawn(pump_req_body(send, body));
+    let resp = match recv.recv_response().await {
+        Ok(r) => r,
+        Err(e) => {
+            pump.abort();
+            return Err(map_h3_err(e));
+        }
+    };
+    let (rparts, ()) = resp.into_parts();
+    let resp_body = H3ClientBody {
+        recv,
+        pump: Some(pump),
+        recv_done: false,
+        end: false,
+    };
+    Ok(http::Response::from_parts(
+        rparts,
+        crate::body::boxed(resp_body),
+    ))
+}
+
+/// Feed a proxy request body into the h3 stream's send half: DATA →
+/// `send_data`, trailers → `send_trailers`, then `finish`. Errors just
+/// fail the upload — the peer's response still reads normally.
+async fn pump_req_body(
+    mut send: h3::client::RequestStream<h3_quinn::SendStream<bytes::Bytes>, bytes::Bytes>,
+    mut body: BoxBody,
+) {
+    use http_body_util::BodyExt;
+    // `Some(Err)` (client aborted or body error) falls out of the loop
+    // like a clean end — the truncated upload propagates on the stream
+    while let Some(Ok(frame)) = body.frame().await {
+        match frame.into_data() {
+            Ok(data) => {
+                if send.send_data(data).await.is_err() {
+                    return;
+                }
+            }
+            Err(frame) => {
+                if let Ok(t) = frame.into_trailers() {
+                    let _ = send.send_trailers(t).await;
+                }
+                break;
+            }
+        }
+    }
+    let _ = send.finish().await;
+}
+
+/// Response body of an h3 upstream request — same shape as the
+/// server-side `H3Body`: DATA → data, trailing HEADERS → trailers.
+/// `pump` is the request-body upload task; it ends with the response.
+struct H3ClientBody {
+    recv: h3::client::RequestStream<h3_quinn::RecvStream, bytes::Bytes>,
+    pump: Option<tokio::task::JoinHandle<()>>,
+    recv_done: bool,
+    end: bool,
+}
+
+impl Drop for H3ClientBody {
+    fn drop(&mut self) {
+        // response dropped mid-body — an unfinished upload should not
+        // outlive it
+        if let Some(p) = &self.pump {
+            p.abort();
+        }
+    }
+}
+
+impl http_body::Body for H3ClientBody {
+    type Data = bytes::Bytes;
+    type Error = crate::errors::BoxError;
+
+    fn poll_frame(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Result<http_body::Frame<Self::Data>, Self::Error>>> {
+        let s = self.get_mut();
+        if s.end {
+            return std::task::Poll::Ready(None);
+        }
+        if !s.recv_done {
+            match s.recv.poll_recv_data(cx) {
+                std::task::Poll::Ready(Ok(Some(mut buf))) => {
+                    let data = buf.copy_to_bytes(buf.remaining());
+                    return std::task::Poll::Ready(Some(Ok(http_body::Frame::data(data))));
+                }
+                std::task::Poll::Ready(Ok(None)) => s.recv_done = true,
+                std::task::Poll::Ready(Err(e)) => {
+                    s.end = true;
+                    return std::task::Poll::Ready(Some(Err(Box::new(e))));
+                }
+                std::task::Poll::Pending => return std::task::Poll::Pending,
+            }
+        }
+        match s.recv.poll_recv_trailers(cx) {
+            std::task::Poll::Ready(Ok(Some(t))) => {
+                s.end = true;
+                std::task::Poll::Ready(Some(Ok(http_body::Frame::trailers(t))))
+            }
+            std::task::Poll::Ready(Ok(None)) => {
+                s.end = true;
+                std::task::Poll::Ready(None)
+            }
+            std::task::Poll::Ready(Err(e)) => {
+                s.end = true;
+                std::task::Poll::Ready(Some(Err(Box::new(e))))
+            }
+            std::task::Poll::Pending => std::task::Poll::Pending,
+        }
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.end
+    }
+}
+
+/// Remove header fields HTTP/3 forbids on the wire (RFC 9114 §4.2).
+/// `te` survives only when its value is exactly `trailers`.
+fn strip_for_h3(headers: &mut http::HeaderMap) {
+    for name in [
+        http::header::CONNECTION,
+        http::header::TRANSFER_ENCODING,
+        http::header::UPGRADE,
+        http::header::HeaderName::from_static("keep-alive"),
+        http::header::HeaderName::from_static("proxy-connection"),
+    ] {
+        headers.remove(name);
+    }
+    let te_ok = headers.get_all(http::header::TE).iter().all(|v| {
+        v.to_str()
+            .is_ok_and(|s| s.trim().eq_ignore_ascii_case("trailers"))
+    });
+    if !te_ok {
+        headers.remove(http::header::TE);
     }
 }
 
@@ -172,6 +496,11 @@ pub enum Return {
     },
     /// Just release the stream slot.
     H2 {
+        /// Its stream permit.
+        permit: OwnedSemaphorePermit,
+    },
+    /// Just release the h3 stream slot.
+    H3 {
         /// Its stream permit.
         permit: OwnedSemaphorePermit,
     },
@@ -237,6 +566,9 @@ pub struct Member {
     pool: Mutex<VecDeque<PooledH1>>,
     /// Shared h2 connection (h2c or negotiated via ALPN).
     h2: Mutex<Option<hyper::client::conn::http2::SendRequest<BoxBody>>>,
+    /// Shared h3 connection — the sender multiplexes streams; `conn`
+    /// tracks liveness (`close_reason` set = dead).
+    h3: Mutex<Option<H3Shared>>,
     /// DNS state; tokio mutex because lookups are async.
     dns: tokio::sync::Mutex<DnsState>,
     /// `host` is an IP literal — no DNS needed.
@@ -271,6 +603,7 @@ impl Member {
             inflight: AtomicUsize::new(0),
             pool: Mutex::new(VecDeque::new()),
             h2: Mutex::new(None),
+            h3: Mutex::new(None),
             dns: tokio::sync::Mutex::new(DnsState::default()),
             literal,
             sem: Arc::new(Semaphore::new(max_connections)),
@@ -405,9 +738,28 @@ impl Member {
             .and_then(|g| g.as_ref().filter(|s| !s.is_closed()).cloned())
     }
 
-    /// Checkout a connection: reuse a pooled h1 conn or the shared h2 conn,
-    /// else dial. Permits enforce `max_connections` per member.
+    /// Live shared h3 sender, if the connection hasn't closed.
+    fn h3_live(&self) -> Option<h3::client::SendRequest<h3_quinn::OpenStreams, bytes::Bytes>> {
+        self.h3.lock().ok().and_then(|g| {
+            g.as_ref()
+                .filter(|s| s.conn.close_reason().is_none())
+                .map(|s| s.sr.clone())
+        })
+    }
+
+    /// Checkout a connection: reuse a pooled h1 conn or the shared h2/h3
+    /// conn, else dial. Permits enforce `max_connections` per member.
     pub async fn checkout(self: &Arc<Self>, cluster: &Cluster) -> Result<Checkout, UpError> {
+        // h3 path: one shared QUIC connection per member, multiplexed
+        // like the h2 pattern
+        if self.url.want == WantProto::H3 {
+            let sr = match self.h3_live() {
+                Some(sr) => sr,
+                None => self.dial_h3(cluster).await?,
+            };
+            let permit = self.stream_permit(cluster).await?;
+            return Ok(Checkout::H3 { sr, permit });
+        }
         // h2 path: explicit h2c, or an https conn that negotiated h2 earlier
         if self.url.want != WantProto::H1
             && let Some(sr) = self.h2_live()
@@ -444,6 +796,7 @@ impl Member {
                     Dialed::H1(sr) => Ok(sr),
                 }
             }
+            WantProto::H3 => unreachable!("h3 checked out above"),
         }
     }
 
@@ -527,6 +880,71 @@ impl Member {
         }
     }
 
+    /// Dial an h3 member: resolve → QUIC connect on the cluster's client
+    /// endpoint → `h3::client` setup → store the shared sender. The QUIC
+    /// handshake carries TLS, so `limits.connect` bounds the whole thing
+    /// — there is no separate TLS stage to time out.
+    async fn dial_h3(
+        self: &Arc<Self>,
+        cluster: &Cluster,
+    ) -> Result<h3::client::SendRequest<h3_quinn::OpenStreams, bytes::Bytes>, UpError> {
+        let addrs = self.addrs(cluster).await?;
+        let name = cluster
+            .tls
+            .sni
+            .clone()
+            .unwrap_or_else(|| self.url.host.clone());
+        let mut last_err = UpError::Connect;
+        for addr in &addrs {
+            let endpoint = cluster.quic_endpoint(addr.is_ipv6())?;
+            let connecting = match endpoint.connect(*addr, &name) {
+                Ok(c) => c,
+                Err(e) => {
+                    tracing::debug!(%addr, %name, error = %e, "h3 connect setup failed");
+                    last_err = UpError::Tls(name.clone());
+                    continue;
+                }
+            };
+            match tokio::time::timeout(cluster.limits.connect, connecting).await {
+                Ok(Ok(conn)) => {
+                    let (mut driver, sr) = h3::client::new(h3_quinn::Connection::new(conn.clone()))
+                        .await
+                        .map_err(|e| {
+                            tracing::debug!(%addr, error = %e, "h3 setup failed");
+                            UpError::Connect
+                        })?;
+                    // drives the conn until it closes; `close_reason()`
+                    // then marks the shared sender dead for h3_live()
+                    tokio::spawn(async move {
+                        let _ = futures_util::future::poll_fn(|cx| driver.poll_close(cx)).await;
+                    });
+                    // last-writer-wins like h2_handshake: loser conns
+                    // serve their dial's request then idle out
+                    if let Ok(mut g) = self.h3.lock() {
+                        *g = Some(H3Shared {
+                            sr: sr.clone(),
+                            conn,
+                        });
+                    }
+                    return Ok(sr);
+                }
+                Ok(Err(e)) => {
+                    tracing::debug!(%addr, error = %e, "h3 QUIC handshake failed");
+                    last_err = UpError::Connect;
+                }
+                Err(_) => {
+                    tracing::debug!(%addr, "h3 QUIC handshake timed out");
+                    last_err = UpError::ConnectTimeout;
+                }
+            }
+        }
+        // dial failed — re-resolve on next request like the TCP path
+        if let Ok(mut st) = self.dns.try_lock() {
+            self.invalidate_dns(&mut st);
+        }
+        Err(last_err)
+    }
+
     async fn h1_handshake(
         &self,
         io: Box<dyn IoT>,
@@ -595,6 +1013,9 @@ impl Member {
         let result = async {
             let addrs = self.addrs(cluster).await.ok()?;
             let addr = *addrs.first()?;
+            if self.url.want == WantProto::H3 {
+                return self.probe_h3(cluster, addr, active).await;
+            }
             let tcp = TcpStream::connect(addr).await.ok()?;
             let _ = tcp.set_nodelay(true);
             let io: Box<dyn IoT> = if self.url.tls {
@@ -671,12 +1092,54 @@ impl Member {
         let resp = sr.send_request(req).await.ok()?;
         Some(resp.status().as_u16() == active.expect)
     }
+
+    /// Active health probe over QUIC — a fresh connection per probe,
+    /// never the shared member one (a probe must measure the member's
+    /// own reachability, not reuse pooled state).
+    async fn probe_h3(
+        &self,
+        cluster: &Cluster,
+        addr: SocketAddr,
+        active: &cfg::ActiveHealth,
+    ) -> Option<bool> {
+        let endpoint = cluster.quic_endpoint(addr.is_ipv6()).ok()?;
+        let name = cluster
+            .tls
+            .sni
+            .clone()
+            .unwrap_or_else(|| self.url.host.clone());
+        let conn = endpoint.connect(addr, &name).ok()?.await.ok()?;
+        let (mut driver, mut sr) = h3::client::new(h3_quinn::Connection::new(conn))
+            .await
+            .ok()?;
+        tokio::spawn(async move {
+            let _ = futures_util::future::poll_fn(|cx| driver.poll_close(cx)).await;
+        });
+        let uri = format!("https://{}{}", self.url.authority(), active.path);
+        let req = http::Request::builder()
+            .method(http::Method::GET)
+            .uri(&uri)
+            .body(())
+            .ok()?;
+        let mut stream = sr.send_request(req).await.ok()?;
+        stream.finish().await.ok()?;
+        let resp = stream.recv_response().await.ok()?;
+        Some(resp.status().as_u16() == active.expect)
+    }
 }
 
 /// Result of a dial: a fresh h1 checkout, or a stored shared h2 sender.
 enum Dialed {
     H1(Checkout),
     H2(hyper::client::conn::http2::SendRequest<BoxBody>),
+}
+
+/// The shared h3 connection state kept on a member: the multiplexed
+/// sender plus the QUIC conn whose `close_reason` is the liveness probe
+/// (the driver task ends when the conn does).
+struct H3Shared {
+    sr: h3::client::SendRequest<h3_quinn::OpenStreams, bytes::Bytes>,
+    conn: quinn::Connection,
 }
 
 /// Boxed upstream IO so plain and TLS streams share the handshake path.
@@ -745,6 +1208,14 @@ pub struct Cluster {
     /// Retries currently in flight (retry-budget numerator).
     pub retries_inflight: AtomicU64,
     tls_cfg: OnceLock<Result<Arc<ClientConfig>, String>>,
+    /// rustls client config for QUIC members — same roots/verifier as
+    /// `tls_cfg` but ALPN `["h3"]` instead of `["h2","http/1.1"]`.
+    tls_cfg_h3: OnceLock<Result<Arc<ClientConfig>, String>>,
+    /// Client UDP endpoint for IPv4 h3 members (one socket multiplexes
+    /// every outgoing QUIC connection to them).
+    quic_v4: OnceLock<Result<quinn::Endpoint, String>>,
+    /// Client UDP endpoint for IPv6 h3 members.
+    quic_v6: OnceLock<Result<quinn::Endpoint, String>>,
     resolver: OnceLock<Result<hickory_resolver::TokioResolver, UpError>>,
     /// Resolved metric handles (`cluster` label bound once).
     pub meters: crate::observe::metrics::ClusterMeters,
@@ -798,6 +1269,9 @@ impl Cluster {
             requests: AtomicU64::new(0),
             retries_inflight: AtomicU64::new(0),
             tls_cfg: OnceLock::new(),
+            tls_cfg_h3: OnceLock::new(),
+            quic_v4: OnceLock::new(),
+            quic_v6: OnceLock::new(),
             resolver: OnceLock::new(),
             meters,
         })
@@ -806,17 +1280,63 @@ impl Cluster {
     /// Lazily build the shared TLS client config.
     fn tls_client(&self) -> Result<Arc<ClientConfig>, UpError> {
         self.tls_cfg
-            .get_or_init(|| build_tls_client(&self.tls))
+            .get_or_init(|| build_tls_client(&self.tls, &["h2", "http/1.1"]))
             .clone()
             .map_err(UpError::Tls)
+    }
+
+    /// QUIC client config for h3 members — same trust roots/verifier
+    /// as TCP upstreams, ALPN `h3`, wrapped for quinn.
+    fn tls_client_h3(&self) -> Result<quinn::ClientConfig, UpError> {
+        let cc = self
+            .tls_cfg_h3
+            .get_or_init(|| build_tls_client(&self.tls, &["h3"]))
+            .clone()
+            .map_err(UpError::Tls)?;
+        let qc = quinn::crypto::rustls::QuicClientConfig::try_from((*cc).clone())
+            .map_err(|e| UpError::Tls(format!("quic client: {e}")))?;
+        Ok(quinn::ClientConfig::new(Arc::new(qc)))
+    }
+
+    /// The cluster's client-side UDP endpoint for h3 members, one per
+    /// address family — a v4 socket can't reach a v6 member (and vice
+    /// versa on single-stack hosts). Built lazily inside tokio context;
+    /// the endpoint's default client config carries `tls` settings.
+    fn quic_endpoint(&self, v6: bool) -> Result<&quinn::Endpoint, UpError> {
+        let lock = if v6 { &self.quic_v6 } else { &self.quic_v4 };
+        lock.get_or_init(|| {
+            let bind: SocketAddr = if v6 {
+                "[::]:0".parse().unwrap()
+            } else {
+                "0.0.0.0:0".parse().unwrap()
+            };
+            let mut ep = quinn::Endpoint::client(bind)
+                .map_err(|e| format!("cannot bind upstream QUIC endpoint {bind}: {e}"))?;
+            ep.set_default_client_config(
+                self.tls_client_h3()
+                    .map_err(|e| format!("upstream QUIC TLS: {e}"))?,
+            );
+            Ok(ep)
+        })
+        .as_ref()
+        .map_err(|e| UpError::Tls(e.clone()))
     }
 
     /// `BuildMode::Check` extra: force the TLS client build now — it is
     /// lazy in `Live` so an https upstream with a bad `tls` block would
     /// only fail on first request, after `verd validate` said OK.
     pub fn check(&self) -> Result<(), String> {
-        if self.members.iter().any(|m| m.url.tls) {
+        if self
+            .members
+            .iter()
+            .any(|m| m.url.tls && m.url.want != WantProto::H3)
+        {
             self.tls_client().map(|_| ()).map_err(|e| e.to_string())?;
+        }
+        if self.members.iter().any(|m| m.url.want == WantProto::H3) {
+            self.tls_client_h3()
+                .map(|_| ())
+                .map_err(|e| e.to_string())?;
         }
         Ok(())
     }
@@ -877,8 +1397,13 @@ impl Cluster {
     }
 }
 
-/// Build the shared rustls client config for a cluster.
-fn build_tls_client(tls: &cfg::UpstreamTls) -> Result<Arc<ClientConfig>, String> {
+/// Build the shared rustls client config for a cluster, with `alpn`
+/// choosing the protocol list — `["h2","http/1.1"]` for TCP upstreams,
+/// `["h3"]` for QUIC.
+fn build_tls_client(
+    tls: &cfg::UpstreamTls,
+    alpn: &[&'static str],
+) -> Result<Arc<ClientConfig>, String> {
     let builder = ClientConfig::builder();
     let mut config = if tls.verify {
         let mut roots =
@@ -914,7 +1439,7 @@ fn build_tls_client(tls: &cfg::UpstreamTls) -> Result<Arc<ClientConfig>, String>
             .with_custom_certificate_verifier(Arc::new(NoVerify::new()))
             .with_no_client_auth()
     };
-    config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+    config.alpn_protocols = alpn.iter().map(|p| p.as_bytes().to_vec()).collect();
     Ok(Arc::new(config))
 }
 
@@ -1367,18 +1892,24 @@ mod tests {
     #[test]
     fn tls_client_variants() {
         assert!(
-            build_tls_client(&cfg::UpstreamTls {
-                verify: false,
-                ca: None,
-                sni: None,
-            })
+            build_tls_client(
+                &cfg::UpstreamTls {
+                    verify: false,
+                    ca: None,
+                    sni: None,
+                },
+                &["h2", "http/1.1"],
+            )
             .is_ok()
         );
-        match build_tls_client(&cfg::UpstreamTls {
-            verify: true,
-            ca: Some("/nonexistent/ca.pem".into()),
-            sni: None,
-        }) {
+        match build_tls_client(
+            &cfg::UpstreamTls {
+                verify: true,
+                ca: Some("/nonexistent/ca.pem".into()),
+                sni: None,
+            },
+            &["h2", "http/1.1"],
+        ) {
             Err(e) => assert!(e.contains("cannot read"), "{e}"),
             Ok(_) => panic!("expected tls build error"),
         }
@@ -1390,11 +1921,14 @@ mod tests {
         )
         .unwrap();
         assert!(
-            build_tls_client(&cfg::UpstreamTls {
-                verify: true,
-                ca: Some(bad),
-                sni: None,
-            })
+            build_tls_client(
+                &cfg::UpstreamTls {
+                    verify: true,
+                    ca: Some(bad),
+                    sni: None,
+                },
+                &["h2", "http/1.1"],
+            )
             .is_err()
         );
     }

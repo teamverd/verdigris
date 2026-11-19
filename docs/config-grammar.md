@@ -32,7 +32,7 @@ where one field dominates the table — they are a closed set:
 
 | Field | Accepted forms | Expands to |
 | --- | --- | --- |
-| `server.listen` | `"ip:port"`/`":port"` \| `{ addr, tls, external_port }` | `ListenAddr` |
+| `server.listen` | `"ip:port"`/`":port"` \| `{ addr, tls, external_port, http3 }` | `ListenAddr` |
 | `server.server_header` | `false` \| `"value"` | `String` (`""` = omit; `"off"` deprecated) |
 | `server.security` | `false` \| table | `SecurityConfig{enabled,…}` |
 | `admin` | `false` \| table | `AdminConfig{enabled,…}` |
@@ -81,7 +81,10 @@ forms total: `route.cache` (`false | "store" | table`), `route.respond`
 (`false | "output" | table`) each carry two shorthands. No field grows
 a fourth spelling.
 `server.listen`'s/`admin.listen`'s `":port"` spelling is an
-address-level nicety inside the string form, not a third form;
+address-level nicety inside the string form, not a third form. The
+`http3` flag inside the table form is an ordinary `bool` scalar — the
+per-listener override for the global `server.http3` switch — not a new
+shape;
 `acme.directory` aliases resolve to their URL at load (one canonical
 value, no second shape). `upstream.<name>`'s `server-entry` is the same
 `"url" | { url, weight, backup }` pair documented for `servers`

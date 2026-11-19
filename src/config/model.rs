@@ -864,6 +864,11 @@ pub struct ServerConfig {
     pub max_connections: usize,
     /// Maximum concurrent connections per client IP address.
     pub max_connections_per_ip: usize,
+    /// HTTP/3 (QUIC/UDP) on every TLS listener: each `tls = true` entry
+    /// also binds a UDP socket on the same address. Per-listener `http3`
+    /// overrides this for individual entries. HTTP/3 always carries TLS —
+    /// plaintext listeners never get QUIC. Off by default.
+    pub http3: bool,
     /// Baseline security response headers applied to every route;
     /// `security = false` emits none of them.
     #[serde(deserialize_with = "security_or_off")]
@@ -880,6 +885,7 @@ impl Default for ServerConfig {
             server_header: "verd".into(),
             max_connections: 65_536,
             max_connections_per_ip: 256,
+            http3: false,
             security: SecurityConfig::default(),
         }
     }
@@ -971,6 +977,26 @@ pub struct ListenAddr {
     /// `443 → 8443`) makes the bound port unreachable. Unset advertises
     /// `addr`'s port. Only meaningful with `tls = true`.
     pub external_port: Option<u16>,
+    /// HTTP/3 (QUIC/UDP) on this listener. Unset inherits `server.http3`;
+    /// `http3 = true` requires `tls = true`. Responses on the TCP side
+    /// advertise `Alt-Svc` when HTTP/3 is enabled here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub http3: Option<bool>,
+}
+
+impl ListenAddr {
+    /// Effective HTTP/3 enablement for this listener: per-entry `http3`
+    /// wins, else the global `server.http3`; QUIC still requires `tls`.
+    pub fn http3_enabled(&self, global: bool) -> bool {
+        self.tls && self.http3.unwrap_or(global)
+    }
+
+    /// Port advertised to clients for this listener — `external_port`
+    /// when set (NAT/container publishing), else the bound port. Shared
+    /// by the HTTP→HTTPS redirect and `Alt-Svc` derivations.
+    pub fn advertised_port(&self) -> u16 {
+        self.external_port.unwrap_or_else(|| self.addr.port())
+    }
 }
 
 /// `":8080"` reads as all-interfaces wildcard — prepend `0.0.0.0`.
@@ -1044,6 +1070,8 @@ struct ListenAddrTable {
     tls: bool,
     #[serde(default)]
     external_port: Option<u16>,
+    #[serde(default)]
+    http3: Option<bool>,
 }
 
 impl<'de> Deserialize<'de> for ListenAddr {
@@ -1053,12 +1081,13 @@ impl<'de> Deserialize<'de> for ListenAddr {
 }
 
 impl<'de> Shorthand<'de> for ListenAddr {
-    const EXPECTING: &'static str = "listen entries must be \"ip:port\" or \":port\" strings or { addr, tls, external_port } tables";
+    const EXPECTING: &'static str = "listen entries must be \"ip:port\" or \":port\" strings or { addr, tls, external_port, http3 } tables";
     fn from_str(s: &str) -> Option<Self> {
         Some(Self {
             addr: parse_listen_addr(s).ok()?,
             tls: false,
             external_port: None,
+            http3: None,
         })
     }
     fn from_map<A: serde::de::MapAccess<'de>>(m: A) -> Result<Self, A::Error> {
@@ -1079,6 +1108,7 @@ impl<'de> Shorthand<'de> for ListenAddr {
                 }),
             tls: t.tls,
             external_port: t.external_port,
+            http3: t.http3,
         })
     }
 }
@@ -1102,6 +1132,9 @@ pub enum ListenAddrSchema {
         /// publishing (default `addr`'s port). Only meaningful with
         /// `tls = true`.
         external_port: Option<u16>,
+        /// HTTP/3 (QUIC/UDP) on this listener — requires `tls = true`;
+        /// unset inherits `server.http3`.
+        http3: Option<bool>,
     },
 }
 
@@ -1111,6 +1144,7 @@ impl Default for ListenAddr {
             addr: SocketAddr::from(([0, 0, 0, 0], 80)),
             tls: false,
             external_port: None,
+            http3: None,
         }
     }
 }
@@ -1522,7 +1556,7 @@ fn default_one() -> u32 {
 /// healthy.
 #[derive(Debug, Clone, JsonSchema)]
 pub struct UpstreamServer {
-    /// Server URL: `http://`, `https://`, or `h2c://`.
+    /// Server URL: `http://`, `https://`, `h2c://`, or `h3://`.
     pub url: String,
     /// Relative selection weight (≥ 1).
     pub weight: u32,
@@ -1643,7 +1677,7 @@ pub enum UpstreamServerSchema {
 /// `{ url, weight, backup }` entry form.
 #[derive(JsonSchema)]
 pub struct UpstreamServerEntry {
-    /// Server URL: `http://`, `https://`, or `h2c://`.
+    /// Server URL: `http://`, `https://`, `h2c://`, or `h3://`.
     pub url: String,
     /// Relative selection weight (≥ 1). Default 1.
     #[serde(default = "default_one")]
@@ -1659,8 +1693,10 @@ pub struct UpstreamServerEntry {
 #[serde(default, deny_unknown_fields)]
 pub struct UpstreamConfig {
     /// Server entries: a URL string or `{ url, weight, backup }` table —
-    /// `http://host:port`, `https://host:port`, or `h2c://` for cleartext
-    /// HTTP/2 prior knowledge (typical for gRPC backends).
+    /// `http://host:port`, `https://host:port`, `h2c://` for cleartext
+    /// HTTP/2 prior knowledge (typical for gRPC backends), or `h3://`
+    /// for HTTP/3 over QUIC (always TLS; one shared QUIC connection
+    /// multiplexes streams per member).
     #[serde(deserialize_with = "one_or_many::deserialize")]
     #[schemars(with = "Vec<UpstreamServerSchema>")]
     pub servers: Vec<UpstreamServer>,

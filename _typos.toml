@@ -12,3 +12,7 @@ Sie = "Sie"
 SIE = "SIE"
 wrk = "wrk" # wrk HTTP benchmarking tool
 WRK = "WRK"
+
+[files]
+# vendor/ holds third-party sources (the h3 patch) — not ours to spell-check.
+extend-exclude = ["vendor"]

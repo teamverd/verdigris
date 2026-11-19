@@ -19,6 +19,7 @@ async fn start(config: &str) -> (String, tokio::sync::watch::Sender<bool>) {
         addr: format!("127.0.0.1:{port}").parse().unwrap(),
         tls: false,
         external_port: None,
+        http3: None,
     }];
     let rt = Runtime::build(Arc::new(cfg)).expect("runtime builds");
     let (tx, rx) = tokio::sync::watch::channel(false);
@@ -182,6 +183,7 @@ respond = { body = "x" }
         addr: "127.0.0.1:0".parse().unwrap(),
         tls: false,
         external_port: None,
+        http3: None,
     }];
     assert!(
         Runtime::build(Arc::new(cfg)).is_err(),
@@ -220,6 +222,7 @@ respond = {{ body = "x" }}
         addr: "127.0.0.1:0".parse().unwrap(),
         tls: false,
         external_port: None,
+        http3: None,
     }];
     let rt = Runtime::build(Arc::new(cfg)).expect("corrupt objects must not break the build");
     let cache = rt.mw_factory.caches()["c"].clone();

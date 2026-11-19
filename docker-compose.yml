@@ -5,18 +5,25 @@ services:
     build: .
     read_only: true
     tmpfs: [/tmp]
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
     volumes:
       - ./demo/verd.toml:/etc/verd/verd.toml:ro
       - ./demo/site:/var/www/site:ro
       - verd-data:/var/lib/verd
     ports:
-      - "8080:8080"
+      - "80:8080"
+      - "443:8443"
       - "127.0.0.1:2019:2019"
     depends_on: [upstream]
 
   upstream:
-    image: hashicorp/http-echo:latest
+    image: hashicorp/http-echo:latest@sha256:fcb75f691c8b0414d670ae570240cbf95502cc18a9ba57e982ecac589760a186
     command: ["-listen=:9000", "-text=hello from upstream"]
+    user: "65532:65532"
+    read_only: true
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
 
 volumes:
   verd-data:
