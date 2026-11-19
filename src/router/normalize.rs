@@ -299,3 +299,68 @@ wp-config.php
         );
     }
 }
+
+/// `cargo kani` model-checking: proves the invariants the filesystem
+/// join and `path_deny` matching rely on, exhaustively for every
+/// input up to the bound — not just the cases the unit tests name.
+#[cfg(kani)]
+mod proofs {
+    use super::*;
+
+    /// Control experiment: a single concrete call — isolates whether
+    /// verification cost is the harness's symbolic input space or the
+    /// toolchain/dependency baseline.
+    #[kani::proof]
+    fn sanity_concrete() {
+        assert_eq!(normalize_path("/a/../b").unwrap(), "/b");
+    }
+
+    /// A symbolic path of `N` segments over the shapes normalization
+    /// must classify: empty (dup slashes), dots, encoded dots/slashes,
+    /// bad encodings (NUL/control/UTF-8) and plain names. Symbolic at
+    /// segment granularity — a flat symbolic byte string lets the
+    /// percent-decoder FSM explode the state space (minutes → never).
+    fn seg() -> &'static str {
+        match kani::any::<u8>() % 10 {
+            0 => "",
+            1 => ".",
+            2 => "..",
+            3 => "%2e",
+            4 => "%2e%2e",
+            5 => "%2f",
+            6 => "%00",
+            7 => "%09",
+            8 => "%ff",
+            _ => "ab",
+        }
+    }
+
+    /// On success the path is absolute and every segment is a plain
+    /// segment — never `..`, `.` or empty — which is what makes the
+    /// result safe to join onto a document root. Also proves
+    /// normalization never expands the path (bounded DoS surface).
+    /// Note it does NOT assert idempotence: `/%252e%252e/` normalizes
+    /// to a literal `%2e` segment which a *second* pass would decode —
+    /// callers must normalize exactly once, before matching.
+    #[kani::proof]
+    fn output_is_rooted_with_plain_segments() {
+        let raw = format!(
+            "/{}/{}/{}/{}/{}",
+            seg(),
+            seg(),
+            seg(),
+            seg(),
+            seg()
+        );
+        if let Ok(p) = normalize_path(&raw) {
+            assert!(p.starts_with('/'));
+            if p != "/" {
+                let body = p.strip_suffix('/').unwrap_or(&p);
+                for seg in body.split('/').skip(1) {
+                    assert!(!seg.is_empty() && seg != "." && seg != "..");
+                }
+            }
+            assert!(p.len() <= raw.len() + 1);
+        }
+    }
+}

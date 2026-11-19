@@ -59,6 +59,17 @@ scanning; fails on fixable HIGH/CRITICAL) and runs informational
 `security-and-quality` query suite on PRs, pushes, and weekly
 (Wednesday 04:15 UTC). SARIF uploads feed the Security tab.
 
+### `kani.yml` — model-checked invariants
+
+`cargo kani` via `model-checking/kani-github-action` (Kani version
+pinned) proves `#[cfg(kani)]` harnesses on attacker-controlled pure
+functions, exhaustively within input bounds — today `normalize_path`
+(output is rooted, plain segments only, never expands),
+`parse_range` (`start <= end < size` for every header and file size)
+and `encoding_quality` (stays in its documented 0–1000 range).
+Plain builds strip the harnesses; `cargo install kani-verifier &&
+cargo kani setup && cargo kani` reproduces locally.
+
 ### `cflite_pr.yml` — PR fuzz smoke
 
 ClusterFuzzLite builds the fuzz harnesses (~7 min, cached) and runs a

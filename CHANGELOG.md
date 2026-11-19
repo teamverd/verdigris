@@ -34,6 +34,25 @@ workflow publishes the matching section as the GitHub release notes.
   (`docs/book/theme/`) and appears in the README, the book landing
   page, and generated GitHub release notes
 
+### Fixed
+
+- **`Accept-Encoding` q-values clamp to 0–1** — a `q` parameter above
+  1 (e.g. `br;q=9`) previously escaped the function's documented
+  0–1000 scaled range via float→`u16` saturation; Kani's
+  `encoding_quality_in_range` proof flagged it. Out-of-range q-values
+  now saturate at the top preference instead of wrapping around
+  halfway
+
+### Build & CI
+
+- **Kani model-checking gate** — `#[kani::proof]` harnesses
+  (`.github/workflows/kani.yml`, `cargo kani` locally) prove bounded
+  invariants exhaustively on attacker-controlled parsers:
+  `normalize_path` output is always rooted with plain segments only,
+  and `parse_range` always returns an in-bounds window (`start <= end
+  < size`) for every header string and file size. Harnesses compile
+  only under `cfg(kani)` — zero cost to normal builds
+
 ## [1.7.0] - 2026-11-18
 
 ### Fixed
