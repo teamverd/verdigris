@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="128" height="128" role="img" aria-label="Verdigris"
+    xmlns:c2pa="http://c2pa.org/manifest">
+    <title>Verdigris</title>
+    <defs>
+        <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+            <stop offset="0" stop-color="#145254"/>
+            <stop offset="1" stop-color="#0A2D30"/>
+        </linearGradient>
+        <linearGradient id="patina" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0" stop-color="#9AF0DC"/>
+            <stop offset="1" stop-color="#3FB8A6"/>
+        </linearGradient>
+        <linearGradient id="copper" x1="0" y1="0" x2="1" y2="1">
+            <stop offset="0" stop-color="#E8A068"/>
+            <stop offset="1" stop-color="#B8683A"/>
+        </linearGradient>
+    </defs>
+    <rect width="256" height="256" rx="58" fill="url(#bg)"/>
+    <rect x="6" y="6" width="244" height="244" rx="52" fill="none" stroke="#5FD0C0" stroke-opacity=".18" stroke-width="2"/>
+
+    <!-- artwork shifted down 20 so its visual weight, not just its bounding box, sits at the badge center -->
+    <g transform="translate(0,20)">
+        <g fill="none" stroke="url(#patina)" stroke-width="12" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M80 48 C80 88 128 88 128 128"/>
+            <path d="M128 48 V128"/>
+            <path d="M176 48 C176 88 128 88 128 128"/>
+            <path d="M128 172 V212"/>
+        </g>
+        <circle cx="128" cy="150" r="22" fill="#0A2D30" stroke="url(#copper)" stroke-width="11"/>
+    </g>
+</svg>

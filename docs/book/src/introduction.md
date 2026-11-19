@@ -1,5 +1,7 @@
 # Verdigris
 
+![Verdigris logo](icon.svg)
+
 **Documentation for verd 1.7.0.**
 
 Verdigris is a self-hosting web server and reverse proxy in a single static

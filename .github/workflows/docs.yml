@@ -3,9 +3,9 @@ name: Docs
 on:
   push:
     branches: [main]
-    paths: ["docs/**", "llms.txt", "src/config/**", ".github/workflows/docs.yml"]
+    paths: ["docs/**", "icon.svg", "llms.txt", "src/config/**", ".github/workflows/docs.yml"]
   pull_request:
-    paths: ["docs/**", "llms.txt", ".github/workflows/docs.yml"]
+    paths: ["docs/**", "icon.svg", "llms.txt", ".github/workflows/docs.yml"]
 
 permissions: {}
 
@@ -39,6 +39,16 @@ jobs:
             echo "::error::docs/book/src/introduction.md version line is stale; expected 'verd $v'"
             exit 1
           }
+      # the book's favicon + intro logo are verbatim copies of the root
+      # icon.svg — mdBook doesn't follow symlinked theme files, so the
+      # copies would drift silently without this check
+      - run: |
+          for f in docs/book/theme/favicon.svg docs/book/src/icon.svg; do
+            cmp -s icon.svg "$f" || {
+              echo "::error::$f is out of sync with icon.svg — re-copy it (and regenerate docs/book/theme/favicon.png from it)"
+              exit 1
+            }
+          done
       # config reference is generated from the live schema
       - run: cargo run --quiet -- schema | python3 docs/gen-reference.py > docs/book/src/reference.md
       - run: |

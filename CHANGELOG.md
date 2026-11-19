@@ -11,6 +11,12 @@ workflow publishes the matching section as the GitHub release notes.
 
 ## [Unreleased]
 
+### Added
+
+- **Project icon** — `icon.svg` now serves as the docs-site favicon
+  (`docs/book/theme/`) and appears in the README, the book landing
+  page, and generated GitHub release notes
+
 ## [1.7.0] - 2026-11-18
 
 ### Fixed
