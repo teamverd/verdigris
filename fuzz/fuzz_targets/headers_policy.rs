@@ -95,6 +95,13 @@ fuzz_target!(|data: &[u8]| {
                 "{name} must be single-valued (trusted={trusted})"
             );
         }
+        // x-forwarded-host may be absent (dropped when our host is
+        // unfit to forward) but never multi-valued
+        let xfh = HeaderName::from_static("x-forwarded-host");
+        assert!(
+            h.get_all(&xfh).iter().count() <= 1,
+            "x-forwarded-host must not be multi-valued (trusted={trusted})"
+        );
     }
 
     // encode_path output must be a legal header/request-target byte

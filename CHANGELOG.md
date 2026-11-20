@@ -11,6 +11,14 @@ workflow publishes the matching section as the GitHub release notes.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Duplicated `X-Forwarded-Proto`/`-Host` from a trusted peer collapse
+  to one** — when the direct peer was trusted, verd passed a
+  multi-valued inbound `x-forwarded-proto`/`x-forwarded-host` through
+  verbatim instead of emitting a single value (fuzz-found). The first
+  inbound value now wins, matching what `get()` readers observe
+
 ## [1.8.0] - 2026-11-20
 
 ### Security

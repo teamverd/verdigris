@@ -159,17 +159,20 @@ pub fn set_forwarded(
     }
     // trusted peers' X-Forwarded-Proto/-Host describe the client-facing
     // side (e.g. a TLS terminator's `https`) — keep them; untrusted or
-    // absent values get our own observation
-    if !(peer_trusted && headers.contains_key(&XFP))
-        && let Ok(v) = HeaderValue::from_str(scheme)
-    {
+    // absent values get our own observation. Preservation still collapses
+    // to a single value: a duplicated inbound header must not fan out to
+    // the upstream as-is.
+    if peer_trusted && let Some(v) = headers.get(&XFP).cloned() {
+        headers.insert(XFP, v);
+    } else if let Ok(v) = HeaderValue::from_str(scheme) {
         headers.insert(XFP, v);
     }
-    // XFH: trusted peers' value is preserved; otherwise we emit our own
-    // — and when our host isn't clean we must still REMOVE the client's
-    // spoofed inbound value rather than let it pass through verbatim
-    if peer_trusted && headers.contains_key(&XFH) {
-        // preserved
+    // XFH: trusted peers' value is preserved (first of any duplicates);
+    // otherwise we emit our own — and when our host isn't clean we must
+    // still REMOVE the client's spoofed inbound value rather than let it
+    // pass through verbatim
+    if peer_trusted && let Some(v) = headers.get(&XFH).cloned() {
+        headers.insert(XFH, v);
     } else if host_clean(host)
         && let Ok(v) = HeaderValue::from_str(host)
     {
@@ -378,6 +381,29 @@ mod tests {
         );
         assert_eq!(h.get(&XFP).unwrap(), "https");
         assert_eq!(h.get(&XFH).unwrap(), "original.example");
+    }
+
+    #[test]
+    fn trusted_peer_multi_value_xfp_xfh_collapse() {
+        // a trusted peer's duplicated XFP/XFH still yields a single
+        // outbound value — the first wins
+        let mut h = HeaderMap::new();
+        h.append(&XFP, HeaderValue::from_static("https"));
+        h.append(&XFP, HeaderValue::from_static("http"));
+        h.append(&XFH, HeaderValue::from_static("a.example"));
+        h.append(&XFH, HeaderValue::from_static("b.example"));
+        set_forwarded(
+            &mut h,
+            "10.0.0.1".parse().unwrap(),
+            true,
+            "198.51.100.9".parse().unwrap(),
+            "http",
+            "inner.test",
+        );
+        assert_eq!(h.get_all(&XFP).iter().count(), 1);
+        assert_eq!(h.get(&XFP).unwrap(), "https");
+        assert_eq!(h.get_all(&XFH).iter().count(), 1);
+        assert_eq!(h.get(&XFH).unwrap(), "a.example");
     }
 
     #[test]

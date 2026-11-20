@@ -1,31 +1,31 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="128" height="128" role="img" aria-label="Verdigris"
-    xmlns:c2pa="http://c2pa.org/manifest">
-    <title>Verdigris</title>
-    <defs>
-        <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
-            <stop offset="0" stop-color="#145254"/>
-            <stop offset="1" stop-color="#0A2D30"/>
-        </linearGradient>
-        <linearGradient id="patina" x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0" stop-color="#9AF0DC"/>
-            <stop offset="1" stop-color="#3FB8A6"/>
-        </linearGradient>
-        <linearGradient id="copper" x1="0" y1="0" x2="1" y2="1">
-            <stop offset="0" stop-color="#E8A068"/>
-            <stop offset="1" stop-color="#B8683A"/>
-        </linearGradient>
-    </defs>
-    <rect width="256" height="256" rx="58" fill="url(#bg)"/>
-    <rect x="6" y="6" width="244" height="244" rx="52" fill="none" stroke="#5FD0C0" stroke-opacity=".18" stroke-width="2"/>
-
-    <!-- artwork shifted down 20 so its visual weight, not just its bounding box, sits at the badge center -->
-    <g transform="translate(0,20)">
-        <g fill="none" stroke="url(#patina)" stroke-width="12" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M80 48 C80 88 128 88 128 128"/>
-            <path d="M128 48 V128"/>
-            <path d="M176 48 C176 88 128 88 128 128"/>
-            <path d="M128 172 V212"/>
-        </g>
-        <circle cx="128" cy="150" r="22" fill="#0A2D30" stroke="url(#copper)" stroke-width="11"/>
-    </g>
+<svg viewBox="0 0 256 256" width="128" height="128" role="img" aria-label="Verdigris" version="1.1" id="svg11" sodipodi:docname="icon.svg" inkscape:version="1.4.4 (dcaf3e7d9e, 2026-05-05)"
+   xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape"
+   xmlns:sodipodi="http://sodipodi.sourceforge.net/DTD/sodipodi-0.dtd"
+   xmlns:xlink="http://www.w3.org/1999/xlink"
+   xmlns="http://www.w3.org/2000/svg"
+   xmlns:svg="http://www.w3.org/2000/svg">
+   <sodipodi:namedview id="namedview11" pagecolor="#ffffff" bordercolor="#000000" borderopacity="0.25" inkscape:showpageshadow="2" inkscape:pageopacity="0.0" inkscape:pagecheckerboard="0" inkscape:deskcolor="#d1d1d1" inkscape:zoom="5.8671875" inkscape:cx="64" inkscape:cy="64" inkscape:window-width="1675" inkscape:window-height="1011" inkscape:window-x="0" inkscape:window-y="0" inkscape:window-maximized="1" inkscape:current-layer="svg11" />
+   <title id="title1">Verdigris</title>
+   <defs id="defs6">
+      <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+         <stop offset="0" stop-color="#145254" id="stop1" />
+         <stop offset="1" stop-color="#0A2D30" id="stop2" />
+      </linearGradient>
+      <linearGradient id="patina" x1="0" y1="0" x2="0" y2="1">
+         <stop offset="0" stop-color="#9AF0DC" id="stop3" />
+         <stop offset="1" stop-color="#3FB8A6" id="stop4" />
+      </linearGradient>
+      <linearGradient id="copper" x1="100.5" y1="122.5" x2="155.5" y2="177.5" gradientUnits="userSpaceOnUse" gradientTransform="translate(0,20)">
+         <stop offset="0" stop-color="#E8A068" id="stop5" />
+         <stop offset="1" stop-color="#B8683A" id="stop6" />
+      </linearGradient>
+      <linearGradient inkscape:collect="always" xlink:href="#patina" id="linearGradient11" x1="91.6326" y1="33.91806" x2="91.6326" y2="108.21476" gradientTransform="matrix(0.80757285,0,0,1.2382784,0,20)" gradientUnits="userSpaceOnUse" />
+      <linearGradient inkscape:collect="always" xlink:href="#patina" id="linearGradient13" x1="151.06996" y1="33.91806" x2="151.06996" y2="108.21476" gradientTransform="matrix(0.80757285,0,0,1.2382784,0,20)" gradientUnits="userSpaceOnUse" />
+   </defs>
+   <rect width="256" height="256" rx="58" fill="url(#bg)" id="rect6" />
+   <rect x="6" y="6" width="244" height="244" rx="52" fill="none" stroke="#5FD0C0" stroke-opacity=".18" stroke-width="2" id="rect7" />
+   <!-- artwork shifted down 20 so its visual weight, not just its bounding box, sits at the badge center -->
+   <path d="m 80,68 c 0,40 48,40 48,80" id="path7" style="fill:none;stroke:url(#linearGradient11);stroke-width:12;stroke-linecap:round;stroke-linejoin:round" />
+   <path d="m 176,68 c 0,40 -48,40 -48,80" id="path9" style="fill:none;stroke:url(#linearGradient13);stroke-width:12;stroke-linecap:round;stroke-linejoin:round" />
+   <circle cx="128" cy="170" r="22" fill="#0a2d30" stroke="url(#copper)" stroke-width="11" id="circle10" style="stroke:url(#copper)" />
 </svg>
