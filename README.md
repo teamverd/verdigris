@@ -35,6 +35,47 @@ for comprehensive context when setting up or troubleshooting.
 - [PERFORMANCE.md](PERFORMANCE.md) — benchmark findings vs nginx/caddy+fastcache/ferron
 - [RELEASING.md](RELEASING.md) — how releases and container images are produced
 
+## Correctness & quality
+
+Correctness here means enforceable checks, not prose. The summary
+below — [CI.md](CI.md) has the full job-by-job matrix.
+
+- **Memory safety by construction** — `#![deny(unsafe_code)]`; the one
+  sanctioned `unsafe` is a single `memmap2` file mapping.
+- **Property-tested security boundaries** — `proptest` invariants on
+  the attacker-facing pure functions: normalized paths can't escape
+  their root or smuggle `..` segments, byte-range results always stay
+  within `0..size`, and `Accept-Encoding` quality values stay in the
+  documented `0..=1000`. These encode the invariants a Kani
+  model-checking pilot established — including a real q-value bug it
+  surfaced — at millisecond cost instead of solver minutes.
+- **Continuous fuzzing** — seven `cargo-fuzz` targets over the parsers
+  and matchers (path normalization, route matching, HTTP semantics,
+  header policy, config, cache index, static resolution). ClusterFuzzLite
+  runs a sanitizer-backed smoke on every PR plus a daily batch that
+  evolves a persistent corpus.
+- **The test suite is itself tested** — weekly `cargo-mutants` sweeps
+  flag tests that can't catch mutations; Sunday soak runs long
+  fault-injection tests (`tests/fault.rs`).
+- **Real-stack integration tests** — end-to-end, reload, observability,
+  HTTP/3, fault injection, and live ACME issuance against Pebble.
+- **Gated CI floor** — fmt, clippy, nextest, and rustdoc on stable
+  *and* MSRV 1.88; `cargo deny` (advisories/licenses), `cargo machete`,
+  a 55% coverage floor, CodeQL, workflow linting (zizmor/actionlint/
+  shellcheck), secret scanning, and a changelog gate that fails `src/`
+  changes without a `CHANGELOG.md` entry.
+- **Performance is a check too** — CodSpeed instruction-count benches
+  on the per-request hot path surface regressions as PR signal, not
+  wall-time noise.
+- **Verified releases** — static musl builds embed `cargo-auditable`
+  metadata (the shipped binary itself is auditable), ship a CycloneDX
+  SBOM, and are cosign-signed with SLSA provenance; CI uses hash-pinned
+  actions with least-privilege tokens.
+
+The config surface is pinned the same way: `docs/config-grammar.md`
+freezes the accepted shapes and `surface_audit` tests mirror each
+invariant, so the grammar can't drift silently.
+
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md). Security issues:
