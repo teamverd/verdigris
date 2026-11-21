@@ -11,6 +11,15 @@ workflow publishes the matching section as the GitHub release notes.
 
 ## [Unreleased]
 
+## [1.8.1] - 2026-11-21
+
+### Changed
+
+- **Docs icon refreshed** — the docs-site favicon
+  (`docs/book/theme/favicon.svg` + regenerated `favicon.png`) and the
+  book landing-page logo (`docs/book/src/icon.svg`) now match the
+  updated root `icon.svg`
+
 ### Fixed
 
 - **Duplicated `X-Forwarded-Proto`/`-Host` from a trusted peer collapse
@@ -1170,7 +1179,8 @@ reverse proxy with load balancing and retries, response caching
 (RAM/disk/hybrid), compression, rate limiting, CORS, security headers,
 admin API with atomic reloads, Prometheus metrics.
 
-[Unreleased]: https://github.com/teamverd/verdigris/compare/v1.8.0...HEAD
+[Unreleased]: https://github.com/teamverd/verdigris/compare/v1.8.1...HEAD
+[1.8.1]: https://github.com/teamverd/verdigris/compare/v1.8.0...v1.8.1
 [1.8.0]: https://github.com/teamverd/verdigris/compare/v1.7.0...v1.8.0
 [1.7.0]: https://github.com/teamverd/verdigris/compare/v1.6.0...v1.7.0
 [1.6.0]: https://github.com/teamverd/verdigris/compare/v1.5.0...v1.6.0
