@@ -11,6 +11,13 @@ workflow publishes the matching section as the GitHub release notes.
 
 ## [Unreleased]
 
+### Changed
+
+- **Docs icon refreshed** — the docs-site favicon
+  (`docs/book/theme/favicon.svg` + regenerated `favicon.png`) and the
+  book landing-page logo (`docs/book/src/icon.svg`) now match the
+  updated root `icon.svg`
+
 ### Fixed
 
 - **Duplicated `X-Forwarded-Proto`/`-Host` from a trusted peer collapse
