@@ -32,23 +32,23 @@ pub struct DeadlineGate {
     /// opaque, long-lived, possibly one-directional traffic — no read
     /// deadline may ever apply again.
     pub off: Arc<AtomicBool>,
-    /// The between-requests deadline currently armed on this connection:
-    /// `(armed_at, duration)`. Enforced by a watchdog spawn that force-
-    /// closes the socket — NOT by re-polling a `Sleep` inside
-    /// `poll_read`, because hyper's h1 server path (`mid_message_detect_eof`)
-    /// parks the dispatcher on the last io waker: a read that returned
-    /// `Pending` while `active > 0` leaves only a socket-readiness waker,
-    /// so `poll_read` may never be re-entered after the response ends.
-    pub armed: Arc<Mutex<Option<(Instant, Duration)>>>,
+    /// The between-requests deadline currently armed on this connection.
+    /// Enforced by a watchdog spawn that force-closes the socket — NOT by
+    /// re-polling a `Sleep` inside `poll_read`, because hyper's h1 server
+    /// path (`mid_message_detect_eof`) parks the dispatcher on the last io
+    /// waker: a read that returned `Pending` while `active > 0` leaves only
+    /// a socket-readiness waker, so `poll_read` may never be re-entered
+    /// after the response ends.
+    pub armed: Arc<Mutex<Option<Armed>>>,
     /// The waker from the most recent `poll_read`. When `active` drops
     /// to zero (response finished) or `off` is set (tunnel armed), the
     /// parked connection task must be woken so `poll_read` re-enters and
     /// the deadline can arm — nothing else drives that transition.
     pub read_waker: Arc<Mutex<Option<std::task::Waker>>>,
     /// Armed while a `poll_write`/`poll_flush` stalls (slow-read
-    /// protection — `timeouts.send`). `(armed_at, duration)`; cleared on
-    /// any write progress. Same watchdog force-close as `armed`.
-    pub send_armed: Arc<Mutex<Option<(Instant, Duration)>>>,
+    /// protection — `timeouts.send`). Cleared on any write progress.
+    /// Same watchdog force-close as `armed`.
+    pub send_armed: Arc<Mutex<Option<Armed>>>,
     /// Connection-teardown signal, fired when the connection future
     /// resolves. Deadline watchdogs hold a dup'd socket fd while they
     /// sleep; without this they'd keep the kernel socket alive past the
@@ -94,6 +94,28 @@ impl DeadlineGate {
             .take()
         {
             w.wake();
+        }
+    }
+}
+
+/// An armed connection deadline: `(at, dur)` plus the watchdog task that
+/// enforces it. The watchdog's abort handle lives inside the entry, so
+/// every disarm (`take()` on request start or real read progress, send
+/// progress, conn teardown) kills the task too — previously the task
+/// outlived its arm and a keep-alive connection accumulated one sleeping
+/// watchdog per request cycle (~500 B each, unbounded until conn end).
+pub struct Armed {
+    /// When the deadline was armed.
+    pub at: Instant,
+    /// The deadline duration.
+    pub dur: Duration,
+    wd: Option<tokio::task::AbortHandle>,
+}
+
+impl Drop for Armed {
+    fn drop(&mut self) {
+        if let Some(wd) = &self.wd {
+            wd.abort();
         }
     }
 }
@@ -165,17 +187,17 @@ impl<T> TimeoutIo<T> {
             .unwrap_or_else(|e| e.into_inner());
         // fast path: the deadline already elapsed and we're being polled
         // — report it directly
-        if let Some((t, d)) = *armed
-            && t.elapsed() >= d
+        if let Some(a) = &*armed
+            && a.at.elapsed() >= a.dur
         {
             // leave armed; callers surface the error via the slot
             return;
         }
         if armed.is_none() {
             let dur = self.send;
-            *armed = Some((Instant::now(), dur));
-            if let Some(tcp) = self.tcp.clone() {
+            let wd = self.tcp.as_ref().map(|tcp| {
                 let gate = self.gate.clone();
+                let tcp = tcp.clone();
                 // subscribe before spawning — a receiver created after
                 // `conn_ended` has already fired would mark the signal as
                 // seen and sleep the full deadline anyway
@@ -183,11 +205,12 @@ impl<T> TimeoutIo<T> {
                 tokio::spawn(async move {
                     tokio::select! {
                         () = tokio::time::sleep(dur) => {
-                            let hit = {
-                                let armed =
-                                    gate.send_armed.lock().unwrap_or_else(|e| e.into_inner());
-                                armed.is_some_and(|(t, d)| t.elapsed() >= d)
-                            };
+                            let hit = gate
+                                .send_armed
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .as_ref()
+                                .is_some_and(|a| a.at.elapsed() >= a.dur);
                             if hit {
                                 let _ = tcp.shutdown(std::net::Shutdown::Both);
                             }
@@ -196,8 +219,14 @@ impl<T> TimeoutIo<T> {
                         // last close actually kills the socket
                         _ = dead.changed() => {}
                     }
-                });
-            }
+                })
+                .abort_handle()
+            });
+            *armed = Some(Armed {
+                at: Instant::now(),
+                dur,
+                wd,
+            });
         }
     }
 
@@ -216,7 +245,8 @@ impl<T> TimeoutIo<T> {
             .send_armed
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .is_some_and(|(t, d)| t.elapsed() >= d)
+            .as_ref()
+            .is_some_and(|a| a.at.elapsed() >= a.dur)
     }
 }
 
@@ -252,8 +282,8 @@ impl<T: AsyncRead + Unpin> AsyncRead for TimeoutIo<T> {
             let mut armed = this.gate.armed.lock().unwrap_or_else(|e| e.into_inner());
             // fast path: the deadline already elapsed and hyper happens
             // to be polling us — kill the read directly
-            if let Some((t, d)) = *armed
-                && t.elapsed() >= d
+            if let Some(a) = &*armed
+                && a.at.elapsed() >= a.dur
             {
                 return Poll::Ready(Err(io::Error::new(
                     io::ErrorKind::TimedOut,
@@ -261,23 +291,24 @@ impl<T: AsyncRead + Unpin> AsyncRead for TimeoutIo<T> {
                 )));
             }
             if armed.is_none() {
-                *armed = Some((Instant::now(), timeout));
                 // watchdog: if `poll_read` is never re-entered before the
                 // deadline (hyper stops polling io while parked
                 // mid-message for servers), force-close the socket — the
                 // epoll error wakes the connection task and ends it
-                if let Some(tcp) = this.tcp.clone() {
+                let wd = this.tcp.as_ref().map(|tcp| {
                     let gate = this.gate.clone();
+                    let tcp = tcp.clone();
                     // subscribe before spawning — see `arm_send_deadline`
                     let mut dead = gate.dead.subscribe();
                     tokio::spawn(async move {
                         tokio::select! {
                             () = tokio::time::sleep(timeout) => {
-                                let hit = {
-                                    let armed =
-                                        gate.armed.lock().unwrap_or_else(|e| e.into_inner());
-                                    armed.is_some_and(|(t, d)| t.elapsed() >= d)
-                                };
+                                let hit = gate
+                                    .armed
+                                    .lock()
+                                    .unwrap_or_else(|e| e.into_inner())
+                                    .as_ref()
+                                    .is_some_and(|a| a.at.elapsed() >= a.dur);
                                 if hit {
                                     let _ = tcp.shutdown(std::net::Shutdown::Both);
                                 }
@@ -286,8 +317,14 @@ impl<T: AsyncRead + Unpin> AsyncRead for TimeoutIo<T> {
                             // the last close actually kills the socket
                             _ = dead.changed() => {}
                         }
-                    });
-                }
+                    })
+                    .abort_handle()
+                });
+                *armed = Some(Armed {
+                    at: Instant::now(),
+                    dur: timeout,
+                    wd,
+                });
             }
         }
         match Pin::new(&mut this.inner).poll_read(cx, buf) {
@@ -450,7 +487,8 @@ mod tests {
         gate.armed
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .map(|(_, d)| d)
+            .as_ref()
+            .map(|a| a.dur)
     }
 
     #[test]
@@ -534,7 +572,8 @@ mod tests {
             .send_armed
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .map(|(_, d)| d);
+            .as_ref()
+            .map(|a| a.dur);
         assert_eq!(d, Some(Duration::from_secs(30)));
     }
 
@@ -562,10 +601,11 @@ mod tests {
     fn elapsed_send_deadline_errors() {
         let (_a, b) = duplex(64);
         let gate = DeadlineGate::default();
-        *gate.send_armed.lock().unwrap() = Some((
-            Instant::now() - Duration::from_secs(120),
-            Duration::from_secs(60),
-        ));
+        *gate.send_armed.lock().unwrap() = Some(Armed {
+            at: Instant::now() - Duration::from_secs(120),
+            dur: Duration::from_secs(60),
+            wd: None,
+        });
         let mut t = io(b, false, &gate);
         let (w, _) = waker();
         let mut cx = Context::from_waker(&w);
@@ -579,10 +619,11 @@ mod tests {
     fn elapsed_deadline_errors() {
         let (_a, b) = duplex(64);
         let gate = DeadlineGate::default();
-        *gate.armed.lock().unwrap_or_else(|e| e.into_inner()) = Some((
-            Instant::now() - Duration::from_secs(120),
-            Duration::from_secs(60),
-        ));
+        *gate.armed.lock().unwrap_or_else(|e| e.into_inner()) = Some(Armed {
+            at: Instant::now() - Duration::from_secs(120),
+            dur: Duration::from_secs(60),
+            wd: None,
+        });
         let mut t = io(b, false, &gate);
         let (w, _) = waker();
         match poll_once(&mut t, &w) {

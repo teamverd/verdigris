@@ -238,6 +238,22 @@ fn rss_bytes() -> u64 {
         .unwrap_or(0)
 }
 
+/// Live bytes held by malloc (`mallinfo2().uordblks`): in-use chunks
+/// only. Under sustained multi-threaded churn glibc retains freed
+/// memory inside per-thread arenas instead of unmapping it, so raw RSS
+/// grows without bound though nothing is live — the failure mode that
+/// made this test false-positive (observed: ~190 MB growth over 30 s
+/// with a flat live set). `uordblks` counts what is actually
+/// allocated — a real leak grows it, arena caching does not.
+fn heap_in_use() -> u64 {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    unsafe {
+        return libc::mallinfo2().uordblks as u64;
+    }
+    #[allow(unreachable_code)]
+    rss_bytes()
+}
+
 /// RSS-growth soak: sustained traffic on cached + proxied routes must not
 /// leak. Ignored by default — run `cargo test --test fault -- --ignored`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -277,7 +293,7 @@ cache = {{ store = "main" }}
                 .await,
         );
     }
-    let baseline = rss_bytes();
+    let baseline = heap_in_use();
     let mut peak = baseline;
     let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let mut workers = tokio::task::JoinSet::new();
@@ -293,14 +309,21 @@ cache = {{ store = "main" }}
     }
     for _ in 0..30 {
         tokio::time::sleep(Duration::from_secs(1)).await;
-        peak = peak.max(rss_bytes());
+        peak = peak.max(heap_in_use());
     }
     stop.store(true, Ordering::Relaxed);
     while workers.join_next().await.is_some() {}
-    // steady-state growth must stay modest — allocator noise included
-    let growth = peak.saturating_sub(baseline);
+    // let in-flight drops (bodies, connection teardown) settle so the
+    // reading reflects the retained live set
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    let rested = heap_in_use();
+    // steady-state live-heap growth must stay modest — a real leak
+    // keeps its allocations counted here, allocator churn does not
+    let growth = rested.saturating_sub(baseline);
     assert!(
         growth < 128 * 1024 * 1024,
-        "RSS grew {growth} bytes over soak (baseline {baseline}, peak {peak})"
+        "live heap grew {growth} bytes over soak \
+         (baseline {baseline}, peak {peak}, rested {rested}, rss {})",
+        rss_bytes()
     );
 }
