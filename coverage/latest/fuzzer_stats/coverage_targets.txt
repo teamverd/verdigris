@@ -1,7 +1,7 @@
-static_resolve
+config_parse
+cache_index
 route_match
 path_normalize
 http_semantics
 headers_policy
-cache_index
-config_parse
+static_resolve

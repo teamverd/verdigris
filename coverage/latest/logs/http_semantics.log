@@ -2,32 +2,33 @@ WARNING: Failed to find function "__sanitizer_acquire_crash_state".
 WARNING: Failed to find function "__sanitizer_print_stack_trace".
 WARNING: Failed to find function "__sanitizer_set_death_callback".
 INFO: Running with entropic power schedule (0xFF, 100).
-INFO: Seed: 1769108144
-MERGE-OUTER: 4885 files, 0 in the initial corpus, 0 processed earlier
+INFO: Seed: 2403178120
+MERGE-OUTER: 9145 files, 0 in the initial corpus, 0 processed earlier
 MERGE-OUTER: attempt 1
 WARNING: Failed to find function "__sanitizer_acquire_crash_state".
 WARNING: Failed to find function "__sanitizer_print_stack_trace".
 WARNING: Failed to find function "__sanitizer_set_death_callback".
 INFO: Running with entropic power schedule (0xFF, 100).
-INFO: Seed: 1769158759
+INFO: Seed: 2403228828
 INFO: -max_len is not provided; libFuzzer will not generate inputs larger than 1048576 bytes
-MERGE-INNER: using the control file '/tmp/libFuzzerTemp.Merge488.txt'
-MERGE-INNER: 4885 total files; 0 processed earlier; will process 4885 files now
-#1	pulse  exec/s: 0 rss: 28Mb
-#2	pulse  exec/s: 0 rss: 28Mb
-#4	pulse  exec/s: 0 rss: 28Mb
-#8	pulse  exec/s: 0 rss: 28Mb
-#16	pulse  exec/s: 0 rss: 28Mb
-#32	pulse  exec/s: 0 rss: 28Mb
-#64	pulse  exec/s: 0 rss: 30Mb
-#128	pulse  exec/s: 0 rss: 30Mb
+MERGE-INNER: using the control file '/tmp/libFuzzerTemp.Merge529.txt'
+MERGE-INNER: 9145 total files; 0 processed earlier; will process 9145 files now
+#1	pulse  exec/s: 0 rss: 29Mb
+#2	pulse  exec/s: 0 rss: 29Mb
+#4	pulse  exec/s: 0 rss: 29Mb
+#8	pulse  exec/s: 0 rss: 29Mb
+#16	pulse  exec/s: 0 rss: 29Mb
+#32	pulse  exec/s: 0 rss: 29Mb
+#64	pulse  exec/s: 0 rss: 31Mb
+#128	pulse  exec/s: 0 rss: 31Mb
 #256	pulse  exec/s: 0 rss: 31Mb
-#512	pulse  exec/s: 0 rss: 31Mb
-#1024	pulse  exec/s: 1024 rss: 31Mb
-#2048	pulse  exec/s: 682 rss: 32Mb
-#4096	pulse  exec/s: 240 rss: 36Mb
-#4885	DONE   exec/s: 103 rss: 36Mb
+#512	pulse  exec/s: 0 rss: 32Mb
+#1024	pulse  exec/s: 512 rss: 32Mb
+#2048	pulse  exec/s: 341 rss: 51Mb
+#4096	pulse  exec/s: 240 rss: 53Mb
+#8192	pulse  exec/s: 120 rss: 53Mb
+#9145	DONE   exec/s: 72 rss: 53Mb
 MERGE-OUTER: successful in 1 attempt(s)
-MERGE-OUTER: the control file has 591360 bytes
-MERGE-OUTER: consumed 0Mb (29Mb rss) to parse the control file
+MERGE-OUTER: the control file has 1111101 bytes
+MERGE-OUTER: consumed 0Mb (30Mb rss) to parse the control file
 MERGE-OUTER: 0 new files with 0 new features added; 0 new coverage edges
