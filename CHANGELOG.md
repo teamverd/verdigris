@@ -11,6 +11,16 @@ workflow publishes the matching section as the GitHub release notes.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Keep-alive connections no longer accumulate a deadline watchdog
+  task per request** — `server::timeout` armed a new force-close
+  watchdog on every between-requests arm, and it outlived its arm until
+  `timeouts.idle` elapsed or the connection died. A busy keep-alive
+  connection therefore retained ~500 B of task state per request
+  (~200 MB over a 30 s, ~200k-request soak). The watchdog's abort
+  handle now lives inside the armed slot, so disarming kills it too
+
 ## [1.8.1] - 2026-11-21
 
 ### Changed

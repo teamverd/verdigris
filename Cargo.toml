@@ -145,6 +145,7 @@ name = "hot_paths"
 harness = false
 
 [dev-dependencies]
+libc = "0.2"
 tokio = { version = "1", features = ["test-util"] }
 reqwest = { version = "0.13", default-features = false, features = [
     "rustls",
