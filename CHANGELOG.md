@@ -11,6 +11,12 @@ workflow publishes the matching section as the GitHub release notes.
 
 ## [Unreleased]
 
+### Security
+
+- **`url` bumped to 2.5.9** — fixes RUSTSEC-2026-0592, a stack
+  overflow in `Url::origin()` on nested `blob:` URLs when called on
+  untrusted input
+
 ### Fixed
 
 - **Keep-alive connections no longer accumulate a deadline watchdog
