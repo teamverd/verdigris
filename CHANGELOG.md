@@ -11,6 +11,8 @@ workflow publishes the matching section as the GitHub release notes.
 
 ## [Unreleased]
 
+## [1.8.2] - 2026-11-22
+
 ### Security
 
 - **`url` bumped to 2.5.9** — fixes RUSTSEC-2026-0592, a stack
@@ -1195,7 +1197,8 @@ reverse proxy with load balancing and retries, response caching
 (RAM/disk/hybrid), compression, rate limiting, CORS, security headers,
 admin API with atomic reloads, Prometheus metrics.
 
-[Unreleased]: https://github.com/teamverd/verdigris/compare/v1.8.1...HEAD
+[Unreleased]: https://github.com/teamverd/verdigris/compare/v1.8.2...HEAD
+[1.8.2]: https://github.com/teamverd/verdigris/compare/v1.8.1...v1.8.2
 [1.8.1]: https://github.com/teamverd/verdigris/compare/v1.8.0...v1.8.1
 [1.8.0]: https://github.com/teamverd/verdigris/compare/v1.7.0...v1.8.0
 [1.7.0]: https://github.com/teamverd/verdigris/compare/v1.6.0...v1.7.0
