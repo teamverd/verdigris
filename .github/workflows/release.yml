@@ -162,7 +162,7 @@ jobs:
           {
             # tag-pinned so the icon renders exactly as it shipped in
             # this release, even if it changes later on main
-            printf '<p align="center"><img src="https://raw.githubusercontent.com/%s/%s/icon.svg" width="96" alt="Verdigris"></p>\n\n' \
+            printf '![Verdigris](https://raw.githubusercontent.com/%s/%s/icon.svg)\n\n' \
               "${{ github.repository }}" "$RELEASE_TAG"
             awk -v head="## [${v}]" '
               index($0, head) == 1 { on = 1; next }
