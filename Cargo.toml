@@ -8,6 +8,22 @@ description = "A simple, fast web server and reverse proxy: static files, TLS/AC
 repository = "https://github.com/teamverd/verdigris"
 keywords = ["web-server", "reverse-proxy", "http", "tls", "acme"]
 categories = ["network-programming"]
+# crates.io: ship only what the crate needs to build — repo tooling
+# (CI, vendor/, packaging/, docs/, tests/) stays out. Patterns are
+# gitignore-style: a bare filename matches at ANY depth, so the
+# slash-less entries are anchored with a leading /. benches/ ships
+# only the declared [[bench]] target — cargo refuses a manifest
+# whose declared target file is absent from the package.
+include = [
+    "/src/**/*",
+    "/benches/hot_paths.rs",
+    "/build.rs",
+    "/README.md",
+    "/CHANGELOG.md",
+    "/LICENSE",
+    "/LICENSE-APACHE",
+    "/LICENSE-MIT",
+]
 
 [lib]
 name = "verd"
