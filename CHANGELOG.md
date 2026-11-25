@@ -11,6 +11,24 @@ workflow publishes the matching section as the GitHub release notes.
 
 ## [Unreleased]
 
+### Security
+
+- **`rustix` bumped to 1.1.6** — fixes RUSTSEC-2026-0486 (xattr
+  functions marking unwritten bytes initialized); `url` bumped to
+  2.5.9 in `fuzz/Cargo.lock`; the stale upstream lockfile inside
+  `vendor/h3/` was removed — it pinned vulnerable dev-dependency
+  versions unused by the build but flagged by OpenSSF Scorecard
+  (code scanning alert #27)
+
+### Added
+
+- **`verd` is published to crates.io on every release** — a `publish`
+  job in `release.yml` uses trusted publishing (OIDC, no stored API
+  token), so `cargo install verd` is now an install channel. Caveat:
+  crates-built binaries resolve stock `h3` and lack RFC 9220
+  WebSocket/CONNECT-IP tunneling until an upstream `h3` release ships
+  the vendored additions — signed release binaries are unaffected
+
 ## [1.8.2] - 2026-11-22
 
 ### Security

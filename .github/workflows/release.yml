@@ -162,7 +162,7 @@ jobs:
           {
             # tag-pinned so the icon renders exactly as it shipped in
             # this release, even if it changes later on main
-            printf '<p align="center"><img src="https://raw.githubusercontent.com/%s/%s/icon.svg" width="96" alt="Verdigris"></p>\n\n' \
+            printf '![Verdigris](https://raw.githubusercontent.com/%s/%s/icon.svg)\n\n' \
               "${{ github.repository }}" "$RELEASE_TAG"
             awk -v head="## [${v}]" '
               index($0, head) == 1 { on = 1; next }
@@ -266,3 +266,66 @@ jobs:
           platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ steps.tags.outputs.list }}
+
+  publish:
+    name: publish (crates.io)
+    needs: [build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read # checkout
+      id-token: write # crates.io trusted publishing OIDC
+    env:
+      RELEASE_TAG: ${{ github.ref_name }}
+    steps:
+      # egress audit on the job that can publish to crates.io
+      - uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.ref }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          key: crates-publish
+          lookup-only: true # reads CI caches; never writes them
+      # a crates.io publish is permanent — don't burn a version if the
+      # pushed tag and the manifest disagree
+      - name: resolve crate version
+        id: v
+        run: |
+          v=$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)
+          if [ "$v" != "${RELEASE_TAG#v}" ]; then
+            echo "::error::tag $RELEASE_TAG but Cargo.toml is $v — refusing to publish"
+            exit 1
+          fi
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+      # idempotent for tag re-runs: skip if this version already shipped
+      - name: check crates.io
+        id: published
+        run: |
+          code=$(curl -sS -o /dev/null -w '%{http_code}' \
+            -H 'User-Agent: teamverd/verdigris release.yml' \
+            "https://crates.io/api/v1/crates/verd/$CRATE_VERSION")
+          echo "exists=$([ "$code" = 200 ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+        env:
+          CRATE_VERSION: ${{ steps.v.outputs.version }}
+      # exchanges the job's OIDC token for a temporary crates.io token
+      # (auto-revoked in the action's post step). Requires the
+      # crate-side config: crates.io/verd → Settings → Trusted
+      # Publishing → GitHub (owner teamverd, repo verdigris, workflow
+      # release.yml, no environment)
+      - uses: rust-lang/crates-io-auth-action@3268eb413133e2960fa4ae0e963ca76380c54cd9 # v1.0.6
+        id: crates-io
+        if: steps.published.outputs.exists != 'true'
+      # cargo's verify step builds the packaged crate — this is what
+      # exercises the `include` whitelist and the stripped
+      # [patch.crates-io] (stock h3: no RFC 9220 WebSocket/CONNECT-IP —
+      # see the patch comment in Cargo.toml)
+      - name: cargo publish
+        if: steps.published.outputs.exists != 'true'
+        run: cargo publish
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.crates-io.outputs.token }}

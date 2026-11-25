@@ -124,13 +124,27 @@ in the build context (the regrouped release artifacts), so a bare
 
 ## crates.io
 
-The package publishes as `verd`, but binaries and the container image
-are the primary distribution channel. When a crates release is wanted:
+The `publish` job in `release.yml` pushes `verd` to crates.io on every
+`v*` tag — `cargo install verd` is a supported install channel.
+Binaries, packages, and the container image remain the primary channel.
 
-```sh
-cargo publish --dry-run
-cargo publish
-```
+Auth is **trusted publishing** (OIDC): the job mints a GitHub
+`id-token`, `rust-lang/crates-io-auth-action` exchanges it for a
+30-minute crates.io token, and the action's post step revokes it — no
+API token is stored anywhere. Required one-time crate-side config:
+crates.io → crate **Settings → Trusted Publishing** → GitHub —
+owner `teamverd`, repo `verdigris`, workflow `release.yml`, no
+environment. The job compares the tag against `Cargo.toml`'s version
+and skips when the version is already published, so re-runs and
+re-tags are safe.
+
+Known divergence: `cargo publish` strips `[patch.crates-io]`, so
+crates-built binaries resolve **stock `h3`** and lack RFC 9220
+WebSocket/CONNECT-IP tunneling until an upstream `h3` release carries
+the vendored commits — see the patch comment in `Cargo.toml`. Signed
+release binaries are unaffected. The `include` list in `Cargo.toml`
+keeps the uploaded crate to what it needs to build (`src/`, licenses,
+README, CHANGELOG, the declared bench file, `Cargo.lock`).
 
 ## Docs site
 
