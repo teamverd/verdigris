@@ -308,8 +308,10 @@ jobs:
         run: |
           code=$(curl -sS -o /dev/null -w '%{http_code}' \
             -H 'User-Agent: teamverd/verdigris release.yml' \
-            "https://crates.io/api/v1/crates/verd/${{ steps.v.outputs.version }}")
+            "https://crates.io/api/v1/crates/verd/$CRATE_VERSION")
           echo "exists=$([ "$code" = 200 ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+        env:
+          CRATE_VERSION: ${{ steps.v.outputs.version }}
       # exchanges the job's OIDC token for a temporary crates.io token
       # (auto-revoked in the action's post step). Requires the
       # crate-side config: crates.io/verd → Settings → Trusted
